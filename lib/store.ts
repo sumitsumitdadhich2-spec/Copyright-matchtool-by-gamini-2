@@ -4,13 +4,16 @@ import crypto from 'node:crypto'
 import type { Scan, ScanSummary, LogEntry } from './types'
 import { MODEL_POOL } from './models'
 
-export const DATA_DIR = path.join(process.cwd(), 'data')
+// On Vercel the project directory is read-only; only /tmp is writable.
+// Using /tmp there also keeps the data dir out of build output tracing.
+const BASE_DIR = process.env.VERCEL ? '/tmp' : process.cwd()
+export const DATA_DIR = path.join(BASE_DIR, 'data')
 export const SCANS_DIR = path.join(DATA_DIR, 'scans')
 export const MEDIA_DIR = path.join(DATA_DIR, 'media')
 
 function ensureDirs() {
   for (const d of [DATA_DIR, SCANS_DIR, MEDIA_DIR]) {
-    if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true })
+    if (!fs.existsSync(/*turbopackIgnore: true*/ d)) fs.mkdirSync(d, { recursive: true })
   }
 }
 
@@ -159,7 +162,7 @@ export function listScans(): ScanSummary[] {
 
 export function scanMediaDir(id: string): string {
   const dir = path.join(MEDIA_DIR, id)
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+  if (!fs.existsSync(/*turbopackIgnore: true*/ dir)) fs.mkdirSync(dir, { recursive: true })
   return dir
 }
 
