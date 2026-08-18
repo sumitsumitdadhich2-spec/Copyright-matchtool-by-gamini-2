@@ -21,6 +21,8 @@ export interface ChunkScanResult {
   matched_segments?: string
   segment_matches?: RawSegmentMatch[]
   note: string
+  /** the raw, unparsed model reply text (for debugging/inspection) */
+  raw?: string
 }
 
 export interface SegmentationResult {
@@ -161,7 +163,19 @@ ${segmentsText}
 
 Your job: for EACH segment above, decide whether that exact footage appears anywhere in this one-minute movie chunk, and if so, find the PRECISE time range inside this chunk where it appears.
 
-Work segment by segment. For a segment to count as matched, the SAME footage (same people, same action, same camera shot, same background) must be present in the chunk. The matched movie range should be almost the SAME DURATION as the short segment — but note the editor may have slowed down or sped up the clip, so the durations can differ. Report that as "speed":
+CRITICAL — DO NOT confuse similar-looking scenes with the same scene. Movies often contain multiple scenes with the same actors, same location, same costumes, and similar camera framing. Those are NOT matches. A segment matches ONLY if the chunk contains the IDENTICAL footage — the exact same take, where every frame is the same recording.
+
+Before reporting any segment as matched, verify ALL of these against the chunk footage:
+1. The EXACT same action unfolds in the same order with the same timing (same gestures, same movements, same dialogue mouth movements).
+2. The camera shot is identical: same angle, same framing, same camera movement (pan/zoom/static), same cut points.
+3. Fine background details match: object positions, extras/background people, lighting, shadows, on-screen text.
+4. The faces, expressions, and body positions at the START and at the END of the range match the segment's start and end frames.
+
+If the scene merely LOOKS similar (same characters/location but a different moment, different take, or different camera angle) → it is NOT a match. DO NOT include it in "segment_matches". When in doubt, leave it out — a false match is much worse than a miss.
+
+Confidence scale (per segment): 95-100 = frame-identical, verified start/end frames; 85-94 = same take, very confident; below 85 = do not report it at all.
+
+Work segment by segment. The matched movie range should be almost the SAME DURATION as the short segment — but note the editor may have slowed down or sped up the clip, so the durations can differ. Report that as "speed":
 - "1.0x" if the movie footage plays at the same speed as the short segment.
 - "0.5x (slowed)" if the short clip is slowed down (movie range is shorter than the short segment).
 - "2x (sped up)" if the short clip is sped up (movie range is longer than the short segment).
@@ -172,21 +186,24 @@ Answer in strict JSON, nothing else:
 {"match": true or false, "confidence": 0-100, "matched_segments": "comma list of matched segment ids, e.g. S1, S3", "segment_matches": [{"segment": "S1", "chunk_start": "mm:ss.mmm", "chunk_end": "mm:ss.mmm", "confidence": 0-100, "speed": "1.0x"}], "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "note": "one short sentence"}
 
 Rules:
-- "segment_matches" MUST contain one object for EVERY segment that appears in this chunk, each with its own exact "chunk_start"/"chunk_end" (millisecond precision) and per-segment "confidence".
+- "segment_matches" MUST contain one object for EVERY segment that truly appears in this chunk, each with its own exact "chunk_start"/"chunk_end" (millisecond precision) and per-segment "confidence" (85 minimum — anything you are less sure about must be omitted).
 - The duration of each matched chunk range should be close to that segment's own duration in the short video (unless the clip was slowed/sped up — reflect that in "speed").
 - "matched_segments" is the comma-separated list of the same segment ids that are in "segment_matches".
 - "short_segment"/"chunk_segment" = the overall span covering all matched footage (used as a summary).
 - "match" is true if at least one segment matched.
+- In "note", state briefly WHICH verification details confirmed the match (or why you rejected similar-looking footage).
 - If NOTHING matches: {"match": false, "confidence": 0, "matched_segments": "", "segment_matches": [], "short_segment": "", "chunk_segment": "", "note": "..."}`
 }
 
 const VERIFY_PROMPT = `This is a copyright match verification pass. You are given TWO short videos.
 Video 1 is a segment from a SHORT VIDEO. Video 2 is a segment from a MOVIE that was flagged as a possible match.
 
-Carefully compare them frame by frame. Is Video 1's footage the same footage that appears in Video 2?
+Carefully compare them frame by frame. Is Video 1's footage the IDENTICAL footage (the exact same take, same recording) that appears in Video 2?
+
+WARNING: the earlier pass sometimes flags similar-looking scenes (same actors, same location, similar framing) that are actually DIFFERENT moments or takes. Your job is to catch those false positives. Confirm the match ONLY if the same action unfolds with the same timing, the camera shot/movement is identical, and background details (objects, extras, lighting, on-screen text) line up. Same characters in the same place is NOT enough — reject different takes or nearby moments.
 
 Answer in strict JSON, nothing else:
-{"match": true or false, "confidence": 0-100, "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "note": "one short sentence"}`
+{"match": true or false, "confidence": 0-100, "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "note": "one short sentence: which details confirmed or disproved the match"}`
 
 async function generate(
   ai: GoogleGenAI,
@@ -207,7 +224,9 @@ async function generate(
     const text = resp.text
     if (!text) throw new Error('Empty model response')
     try {
-      return parseModelJSON(text)
+      const parsed = parseModelJSON(text)
+      parsed.raw = text.trim()
+      return parsed
     } catch {
       throw new Error(`Unparseable JSON from model: ${text.slice(0, 200)}`)
     }

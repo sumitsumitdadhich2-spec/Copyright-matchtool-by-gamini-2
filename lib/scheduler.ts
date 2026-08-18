@@ -335,6 +335,11 @@ class Scheduler {
         uploadedName = uploaded.name
         const result = await scanChunkRequest(job.ai, m.id, job.shortUri!, uploaded.uri, job.segmentsText || undefined, job.scan.movieGuess)
 
+        // Always record the raw Gemini reply so wrong matches can be inspected.
+        if (result.raw) {
+          addLog(scan, 'info', `gemini reply (chunk ${chunkIndex}, ${m.id}): ${result.raw.replace(/\s*\n\s*/g, ' ')}`)
+        }
+
         if (result.match && result.confidence >= CONFIDENCE_THRESHOLD) {
           const base = chunkIndex * CHUNK_SECONDS
           const newCands: Candidate[] = []
@@ -345,7 +350,12 @@ class Scheduler {
             const cs = toSecondsMs(sm.chunk_start)
             const ce = toSecondsMs(sm.chunk_end)
             if (!seg || cs === null || ce === null || ce <= cs) continue
-            const conf = sm.confidence >= CONFIDENCE_THRESHOLD ? sm.confidence : result.confidence
+            // Reject weak per-segment matches instead of inflating them with the overall confidence.
+            if (sm.confidence > 0 && sm.confidence < CONFIDENCE_THRESHOLD) {
+              addLog(scan, 'warn', `chunk ${chunkIndex}: ${sm.segment} rejected — per-segment confidence ${sm.confidence} < ${CONFIDENCE_THRESHOLD}`)
+              continue
+            }
+            const conf = sm.confidence > 0 ? sm.confidence : result.confidence
             newCands.push({
               id: crypto.randomBytes(6).toString('hex'),
               chunkIndex,
@@ -529,9 +539,13 @@ class Scheduler {
 
         const su = await uploadVideo(job.ai, shortSeg)
         const mu = await uploadVideo(job.ai, movieSeg)
-        const result = await verifyRequest(job.ai, model.id, su.uri, mu.uri)
-        void deleteFileQuiet(job.ai, su.name)
-        void deleteFileQuiet(job.ai, mu.name)
+      const result = await verifyRequest(job.ai, model.id, su.uri, mu.uri)
+      void deleteFileQuiet(job.ai, su.name)
+      void deleteFileQuiet(job.ai, mu.name)
+
+      if (result.raw) {
+        addLog(scan, 'info', `gemini verify reply (${fmt(region.movieStart)}-${fmt(region.movieEnd)}, ${model.id}): ${result.raw.replace(/\s*\n\s*/g, ' ')}`)
+      }
 
         region.verified = {
           match: result.match && result.confidence >= CONFIDENCE_THRESHOLD,
