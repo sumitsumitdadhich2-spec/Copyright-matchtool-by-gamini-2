@@ -12,4 +12,7 @@ __v0_jsx-dev-runtime.ts
 # Common ignores
 node_modules
 .next/
-.DS_Store
+.DS_Storeuploads/
+*.mp4
+*.avi
+*.mov
