@@ -8,10 +8,21 @@ export interface ChunkState {
   confidence?: number
 }
 
+/** One scene segment detected in the short video during the 20fps segmentation pass. */
+export interface ShortSegment {
+  index: number
+  /** seconds within the short video, millisecond precision */
+  start: number
+  end: number
+  description: string
+}
+
 export interface Candidate {
   id: string
   chunkIndex: number
   confidence: number
+  /** which short-video segments (e.g. "S1, S3") were found in this chunk */
+  matchedSegments?: string
   /** seconds within the short video [start, end] */
   shortSegment: [number, number]
   /** seconds within the chunk [start, end] */
@@ -87,6 +98,10 @@ export interface Scan {
   chunkCount: number
   chunkingProgress: number
   chunks: ChunkState[]
+  /** Gemini's guess of which movie the short video is from (segmentation pass). */
+  movieGuess?: string | null
+  /** Scene segments of the short video detected at 20 fps, saved once and reused. */
+  shortSegments?: ShortSegment[]
   candidates: Candidate[]
   regions: MatchRegion[]
   logs: LogEntry[]

@@ -26,6 +26,8 @@ import {
   uploadVideo,
   deleteFileQuiet,
   scanChunkRequest,
+  segmentShortRequest,
+  segmentsToPromptText,
   verifyRequest,
   parseSegment,
   GeminiError,
@@ -42,6 +44,7 @@ interface Job {
   stopping: boolean
   earlyStop: boolean
   shortUri: string | null
+  segmentsText: string | null
   lastRequestAt: Record<string, number>
   cooldownUntil: Record<string, number>
   dirty: boolean
@@ -89,6 +92,7 @@ class Scheduler {
       stopping: false,
       earlyStop: false,
       shortUri: null,
+      segmentsText: null,
       lastRequestAt: {},
       cooldownUntil: {},
       dirty: true,
@@ -152,6 +156,15 @@ class Scheduler {
     addLog(scan, 'success', 'Short video ready on Gemini')
     this.mark(job)
 
+    // Phase 1: one-time segmentation pass (20 fps). Reuses saved segments on resume.
+    if (scan.shortSegments && scan.shortSegments.length > 0) {
+      job.segmentsText = segmentsToPromptText(scan.shortSegments)
+      addLog(scan, 'info', `Reusing ${scan.shortSegments.length} saved segment(s) from previous run`)
+    } else {
+      await this.segmentShort(job)
+    }
+    this.mark(job)
+
     // One worker per model, all pulling from the shared queue in parallel.
     await Promise.all(MODEL_POOL.map((m) => this.worker(job, m)))
 
@@ -192,6 +205,43 @@ class Scheduler {
     cleanupChunks(path.join(mediaDir, 'chunks'))
     addLog(scan, 'info', 'Temporary chunk files cleaned up')
     this.finish(job)
+  }
+
+  /** Phase 1: send the whole short video at 20 fps → movie guess + millisecond scene segments. */
+  private async segmentShort(job: Job) {
+    const { scan } = job
+    addLog(scan, 'info', `Segmentation pass: analyzing short video at 20 fps (movie ID + scene changes)...`)
+    this.mark(job)
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const model = await this.pickVerifyModel(job)
+      if (!model) break
+      try {
+        const wait = (job.lastRequestAt[model.id] || 0) + MODEL_MIN_INTERVAL_MS - Date.now()
+        if (wait > 0) await sleep(wait)
+        job.lastRequestAt[model.id] = Date.now()
+        const used = incrementModelUsage(model.id, job.apiKey)
+        this.modelState(job, model).usedToday = used
+        this.mark(job)
+        const result = await segmentShortRequest(job.ai, model.id, job.shortUri!)
+        scan.movieGuess = result.movieGuess
+        scan.shortSegments = result.segments
+        job.segmentsText = segmentsToPromptText(result.segments)
+        addLog(scan, 'success', `Movie identified: "${result.movieGuess}" — ${result.segments.length} scene segment(s) detected`)
+        for (const s of result.segments) {
+          addLog(scan, 'info', `  S${s.index}: ${s.start.toFixed(3)}s-${s.end.toFixed(3)}s — ${s.description.slice(0, 80)}`)
+        }
+        this.mark(job)
+        return
+      } catch (err) {
+        const e = err instanceof GeminiError ? err : new GeminiError('other', err instanceof Error ? err.message : String(err))
+        if (e.kind === 'rpd') setModelExhausted(model.id, job.apiKey, model.rpd)
+        else if (e.kind === 'rate') job.cooldownUntil[model.id] = Date.now() + RATE_COOLDOWN_MS
+        addLog(scan, 'warn', `Segmentation attempt ${attempt + 1}/3 failed on ${model.id}: ${e.message.slice(0, 120)}`)
+        this.mark(job)
+      }
+    }
+    addLog(scan, 'warn', 'Segmentation pass failed — continuing scan without segment data')
+    this.mark(job)
   }
 
   private finish(job: Job) {
@@ -282,7 +332,7 @@ class Scheduler {
         const chunkFile = chunkPath(mediaDir, chunkIndex)
         const uploaded = await uploadVideo(job.ai, chunkFile)
         uploadedName = uploaded.name
-        const result = await scanChunkRequest(job.ai, m.id, job.shortUri!, uploaded.uri)
+        const result = await scanChunkRequest(job.ai, m.id, job.shortUri!, uploaded.uri, job.segmentsText || undefined, job.scan.movieGuess)
 
         if (result.match && result.confidence >= CONFIDENCE_THRESHOLD) {
           const chunkSeg = parseSegment(result.chunk_segment) || [0, CHUNK_SECONDS]
@@ -295,6 +345,7 @@ class Scheduler {
             shortSegment: shortSeg,
             chunkSegment: chunkSeg,
             absSegment: [base + chunkSeg[0], base + chunkSeg[1]],
+            matchedSegments: result.matched_segments || undefined,
             model: m.id,
             note: result.note,
           }
@@ -304,7 +355,7 @@ class Scheduler {
           addLog(
             scan,
             'success',
-            `match found ${fmt(cand.absSegment[0])}-${fmt(cand.absSegment[1])} conf ${result.confidence} (chunk ${chunkIndex}, ${m.id})`,
+            `match found ${fmt(cand.absSegment[0])}-${fmt(cand.absSegment[1])} conf ${result.confidence}${result.matched_segments ? ` [segments: ${result.matched_segments}]` : ''} (chunk ${chunkIndex}, ${m.id})`,
           )
           // Early stop when accepted matches cover the whole short video.
           if (this.shortFullyCovered(scan)) {
@@ -431,7 +482,7 @@ class Scheduler {
 
         const model = await this.pickVerifyModel(job)
         if (!model) {
-          addLog(scan, 'warn', `No model available to verify region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} — keeping scan confidence`)
+          addLog(scan, 'warn', `No model available to verify region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} �� keeping scan confidence`)
           region.verified = { match: true, confidence: region.maxConfidence, model: 'unverified', note: 'All models exhausted; using scan confidence' }
           continue
         }
