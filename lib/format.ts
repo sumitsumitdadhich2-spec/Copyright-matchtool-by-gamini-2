@@ -8,6 +8,16 @@ export function fmtTime(sec: number): string {
     : `${m}:${String(ss).padStart(2, '0')}`
 }
 
+/** Millisecond-precision timecode, e.g. "1:02.480". */
+export function fmtTimeMs(sec: number): string {
+  const total = Math.max(0, sec)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const ss = s.toFixed(3).padStart(6, '0')
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`
+}
+
 export function fmtBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`

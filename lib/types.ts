@@ -23,6 +23,12 @@ export interface Candidate {
   confidence: number
   /** which short-video segments (e.g. "S1, S3") were found in this chunk */
   matchedSegments?: string
+  /** the single short segment id this candidate maps (e.g. "S1"), when per-segment mapping is available */
+  segmentId?: string
+  /** playback speed of the short clip vs the movie, e.g. "1.0x", "0.5x (slowed)", "2x (sped up)" */
+  speed?: string
+  /** one-line description of the short segment (from the segmentation pass) */
+  segmentDescription?: string
   /** seconds within the short video [start, end] */
   shortSegment: [number, number]
   /** seconds within the chunk [start, end] */

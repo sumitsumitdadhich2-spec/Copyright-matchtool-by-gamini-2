@@ -30,6 +30,7 @@ import {
   segmentsToPromptText,
   verifyRequest,
   parseSegment,
+  toSecondsMs,
   GeminiError,
 } from './gemini'
 
@@ -335,28 +336,60 @@ class Scheduler {
         const result = await scanChunkRequest(job.ai, m.id, job.shortUri!, uploaded.uri, job.segmentsText || undefined, job.scan.movieGuess)
 
         if (result.match && result.confidence >= CONFIDENCE_THRESHOLD) {
-          const chunkSeg = parseSegment(result.chunk_segment) || [0, CHUNK_SECONDS]
-          const shortSeg = parseSegment(result.short_segment) || [0, scan.shortDuration || 60]
           const base = chunkIndex * CHUNK_SECONDS
-          const cand: Candidate = {
-            id: crypto.randomBytes(6).toString('hex'),
-            chunkIndex,
-            confidence: result.confidence,
-            shortSegment: shortSeg,
-            chunkSegment: chunkSeg,
-            absSegment: [base + chunkSeg[0], base + chunkSeg[1]],
-            matchedSegments: result.matched_segments || undefined,
-            model: m.id,
-            note: result.note,
+          const newCands: Candidate[] = []
+
+          // Preferred path: exact per-segment mapping (S1 → precise chunk range + speed).
+          for (const sm of result.segment_matches || []) {
+            const seg = scan.shortSegments?.find((s) => `S${s.index}` === sm.segment.trim().toUpperCase())
+            const cs = toSecondsMs(sm.chunk_start)
+            const ce = toSecondsMs(sm.chunk_end)
+            if (!seg || cs === null || ce === null || ce <= cs) continue
+            const conf = sm.confidence >= CONFIDENCE_THRESHOLD ? sm.confidence : result.confidence
+            newCands.push({
+              id: crypto.randomBytes(6).toString('hex'),
+              chunkIndex,
+              confidence: conf,
+              segmentId: sm.segment.trim().toUpperCase(),
+              speed: sm.speed || '1.0x',
+              segmentDescription: seg.description,
+              shortSegment: [seg.start, seg.end],
+              chunkSegment: [cs, ce],
+              absSegment: [base + cs, base + ce],
+              matchedSegments: result.matched_segments || undefined,
+              model: m.id,
+              note: result.note,
+            })
           }
-          scan.candidates.push(cand)
+
+          // Fallback: no per-segment data — keep the single coarse candidate.
+          if (newCands.length === 0) {
+            const chunkSeg = parseSegment(result.chunk_segment) || [0, CHUNK_SECONDS]
+            const shortSeg = parseSegment(result.short_segment) || [0, scan.shortDuration || 60]
+            newCands.push({
+              id: crypto.randomBytes(6).toString('hex'),
+              chunkIndex,
+              confidence: result.confidence,
+              shortSegment: shortSeg,
+              chunkSegment: chunkSeg,
+              absSegment: [base + chunkSeg[0], base + chunkSeg[1]],
+              matchedSegments: result.matched_segments || undefined,
+              model: m.id,
+              note: result.note,
+            })
+          }
+
+          for (const cand of newCands) scan.candidates.push(cand)
           chunk.status = 'match'
           chunk.confidence = result.confidence
-          addLog(
-            scan,
-            'success',
-            `match found ${fmt(cand.absSegment[0])}-${fmt(cand.absSegment[1])} conf ${result.confidence}${result.matched_segments ? ` [segments: ${result.matched_segments}]` : ''} (chunk ${chunkIndex}, ${m.id})`,
-          )
+          for (const cand of newCands) {
+            const dur = (t: [number, number]) => (t[1] - t[0]).toFixed(2)
+            addLog(
+              scan,
+              'success',
+              `${cand.segmentId ? `${cand.segmentId} ` : ''}mapped short ${fmtMs(cand.shortSegment[0])}-${fmtMs(cand.shortSegment[1])} (${dur(cand.shortSegment)}s) → movie ${fmtMs(cand.absSegment[0])}-${fmtMs(cand.absSegment[1])} (${dur(cand.absSegment)}s)${cand.speed && cand.speed !== '1.0x' ? ` · ${cand.speed}` : ''} conf ${cand.confidence} (chunk ${chunkIndex}, ${m.id})`,
+            )
+          }
           // Early stop when accepted matches cover the whole short video.
           if (this.shortFullyCovered(scan)) {
             job.earlyStop = true
@@ -548,6 +581,16 @@ function fmt(sec: number): string {
   const m = Math.floor((s % 3600) / 60)
   const ss = s % 60
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}` : `${m}:${String(ss).padStart(2, '0')}`
+}
+
+/** Millisecond-precision timecode, e.g. "1:02.480". */
+function fmtMs(sec: number): string {
+  const total = Math.max(0, sec)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const ss = s.toFixed(3).padStart(6, '0')
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`
 }
 
 // Singleton that survives HMR in dev.

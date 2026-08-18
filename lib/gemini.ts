@@ -96,12 +96,24 @@ export function parseModelJSON(text: string): ChunkScanResult {
     if (start >= 0 && end > start) raw = raw.slice(start, end + 1)
   }
   const parsed = JSON.parse(raw) as Partial<ChunkScanResult>
+  const segment_matches: RawSegmentMatch[] = Array.isArray(parsed.segment_matches)
+    ? parsed.segment_matches
+        .map((s) => ({
+          segment: String(s?.segment || '').trim(),
+          chunk_start: String(s?.chunk_start || '').trim(),
+          chunk_end: String(s?.chunk_end || '').trim(),
+          confidence: Number(s?.confidence) || 0,
+          speed: String(s?.speed || '1.0x').trim(),
+        }))
+        .filter((s) => s.segment && s.chunk_start && s.chunk_end)
+    : []
   return {
     match: Boolean(parsed.match),
     confidence: Number(parsed.confidence) || 0,
     short_segment: String(parsed.short_segment || ''),
     chunk_segment: String(parsed.chunk_segment || ''),
     matched_segments: String(parsed.matched_segments || ''),
+    segment_matches,
     note: String(parsed.note || ''),
   }
 }
@@ -140,12 +152,32 @@ Rules:
 function buildScanPrompt(segmentsText?: string, movieGuess?: string | null): string {
   if (!segmentsText) return SCAN_PROMPT_BASE
   const guessLine = movieGuess && movieGuess !== 'uncertain' ? `\nThe short video is believed to be from the movie: ${movieGuess}.` : ''
-  return `${SCAN_PROMPT_BASE}
+  return `This is a copyright match tool. You are given TWO videos.
+Video 1 is the SHORT VIDEO (the clip we are trying to locate). It was cut from a movie and has ALREADY been split into scene segments.
+Video 2 is a ONE-MINUTE CHUNK taken from that full movie.
 ${guessLine}
-The short video has already been analyzed and split into these scene segments:
+The short video's scene segments are (id: start-end within the SHORT video — description):
 ${segmentsText}
 
-Check EACH segment individually against this one-minute movie chunk. Report every segment that appears in this chunk in "matched_segments", and make "short_segment"/"chunk_segment" cover the matched footage.`
+Your job: for EACH segment above, decide whether that exact footage appears anywhere in this one-minute movie chunk, and if so, find the PRECISE time range inside this chunk where it appears.
+
+Work segment by segment. For a segment to count as matched, the SAME footage (same people, same action, same camera shot, same background) must be present in the chunk. The matched movie range should be almost the SAME DURATION as the short segment — but note the editor may have slowed down or sped up the clip, so the durations can differ. Report that as "speed":
+- "1.0x" if the movie footage plays at the same speed as the short segment.
+- "0.5x (slowed)" if the short clip is slowed down (movie range is shorter than the short segment).
+- "2x (sped up)" if the short clip is sped up (movie range is longer than the short segment).
+
+Give every timestamp with MILLISECOND precision as mm:ss.mmm (e.g. "00:12.480").
+
+Answer in strict JSON, nothing else:
+{"match": true or false, "confidence": 0-100, "matched_segments": "comma list of matched segment ids, e.g. S1, S3", "segment_matches": [{"segment": "S1", "chunk_start": "mm:ss.mmm", "chunk_end": "mm:ss.mmm", "confidence": 0-100, "speed": "1.0x"}], "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "note": "one short sentence"}
+
+Rules:
+- "segment_matches" MUST contain one object for EVERY segment that appears in this chunk, each with its own exact "chunk_start"/"chunk_end" (millisecond precision) and per-segment "confidence".
+- The duration of each matched chunk range should be close to that segment's own duration in the short video (unless the clip was slowed/sped up — reflect that in "speed").
+- "matched_segments" is the comma-separated list of the same segment ids that are in "segment_matches".
+- "short_segment"/"chunk_segment" = the overall span covering all matched footage (used as a summary).
+- "match" is true if at least one segment matched.
+- If NOTHING matches: {"match": false, "confidence": 0, "matched_segments": "", "segment_matches": [], "short_segment": "", "chunk_segment": "", "note": "..."}`
 }
 
 const VERIFY_PROMPT = `This is a copyright match verification pass. You are given TWO short videos.
@@ -186,7 +218,7 @@ async function generate(
 }
 
 /** Parse "mm:ss.mmm" (or h:mm:ss.mmm / mm:ss) into seconds with millisecond precision. */
-function toSecondsMs(t: string): number | null {
+export function toSecondsMs(t: string): number | null {
   const m = t.trim().match(/^(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/)
   if (!m) return null
   const h = m[1] ? Number(m[1]) : 0
