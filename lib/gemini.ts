@@ -2,12 +2,24 @@ import { GoogleGenAI } from '@google/genai'
 import { SCAN_FPS, VERIFY_FPS, SEGMENT_FPS } from './models'
 import type { ShortSegment } from './types'
 
+export interface RawSegmentMatch {
+  /** segment id, e.g. "S1" */
+  segment: string
+  /** exact time range within the movie chunk, mm:ss.mmm */
+  chunk_start: string
+  chunk_end: string
+  confidence: number
+  /** playback speed of the short clip vs the movie, e.g. "1.0x", "0.5x (slowed)", "2x (sped up)" */
+  speed: string
+}
+
 export interface ChunkScanResult {
   match: boolean
   confidence: number
   short_segment: string
   chunk_segment: string
   matched_segments?: string
+  segment_matches?: RawSegmentMatch[]
   note: string
 }
 
