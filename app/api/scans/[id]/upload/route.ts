@@ -4,7 +4,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { getScan, saveScan, addLog, scanMediaDir } from '@/lib/store'
-import { probeDuration, chunkMovie } from '@/lib/ffmpeg'
+import { probeDuration, chunkMovie, extractSegment } from '@/lib/ffmpeg'
 import { CHUNK_SECONDS } from '@/lib/models'
 
 export const runtime = 'nodejs'
@@ -28,7 +28,7 @@ export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }
 
   // Stream the request body straight to disk — movies can be gigabytes.
   await pipeline(Readable.fromWeb(req.body as never), fs.createWriteStream(dest))
-  const size = fs.statSync(dest).size
+  let size = fs.statSync(dest).size
 
   let duration: number
   try {
@@ -39,6 +39,25 @@ export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }
   }
 
   if (kind === 'short') {
+    // If the target clip is longer than 1 minute, keep only the first minute.
+    if (duration > CHUNK_SECONDS + 1) {
+      const originalDur = duration
+      const trimmed = path.join(mediaDir, 'short-trimmed.mp4')
+      try {
+        await extractSegment(dest, 0, CHUNK_SECONDS, trimmed)
+        fs.renameSync(trimmed, dest)
+        size = fs.statSync(dest).size
+        duration = await probeDuration(dest)
+        addLog(scan, 'info', `Short clip was ${fmtDur(originalDur)} — auto-trimmed to first ${fmtDur(duration)}`)
+      } catch (err) {
+        try {
+          if (fs.existsSync(trimmed)) fs.unlinkSync(trimmed)
+        } catch {
+          // ignore
+        }
+        addLog(scan, 'warn', `Auto-trim failed, keeping full ${fmtDur(originalDur)} clip: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }
     scan.shortName = name
     scan.shortSize = size
     scan.shortDuration = duration

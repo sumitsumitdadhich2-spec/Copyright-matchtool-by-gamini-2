@@ -69,7 +69,7 @@ export function UploadPanel({ scan, onScanCreated, refresh }: Props) {
           kind="short"
           icon={<Film className="size-5" aria-hidden />}
           title="Short video"
-          subtitle="The clip to find (~1 min)"
+          subtitle="The clip to find — auto-trimmed to first 1 min if longer"
           name={scan?.shortName}
           duration={scan?.shortDuration}
           size={scan?.shortSize}
@@ -153,7 +153,7 @@ function Dropzone(props: {
       <input
         ref={inputRef}
         type="file"
-        accept="video/*"
+        accept="video/*,.mp4,.mov,.m4v,.mkv,.webm,.avi,.3gp,.3g2,.ts,.mts,.m2ts,.flv,.wmv,.mpg,.mpeg"
         className="sr-only"
         onChange={(e) => {
           const f = e.target.files?.[0]
