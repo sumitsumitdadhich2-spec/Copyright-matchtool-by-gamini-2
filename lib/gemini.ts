@@ -11,6 +11,14 @@ export interface RawSegmentMatch {
   confidence: number
   /** playback speed of the short clip vs the movie, e.g. "1.0x", "0.5x (slowed)", "2x (sped up)" */
   speed: string
+  /** which start/end frame details and fingerprints confirmed this exact take */
+  evidence?: string
+}
+
+export interface RejectedLookalike {
+  segment: string
+  chunk_range: string
+  reason: string
 }
 
 export interface ChunkScanResult {
@@ -20,6 +28,7 @@ export interface ChunkScanResult {
   chunk_segment: string
   matched_segments?: string
   segment_matches?: RawSegmentMatch[]
+  rejected_lookalikes?: RejectedLookalike[]
   note: string
 }
 
@@ -96,30 +105,87 @@ export function parseModelJSON(text: string): ChunkScanResult {
     if (start >= 0 && end > start) raw = raw.slice(start, end + 1)
   }
   const parsed = JSON.parse(raw) as Partial<ChunkScanResult>
+  const segmentMatches: RawSegmentMatch[] = Array.isArray(parsed.segment_matches)
+    ? parsed.segment_matches
+        .filter((m) => m && typeof m === 'object')
+        .map((m) => ({
+          segment: String(m.segment || ''),
+          chunk_start: String(m.chunk_start || ''),
+          chunk_end: String(m.chunk_end || ''),
+          confidence: Number(m.confidence) || 0,
+          speed: String(m.speed || '1.0x'),
+          evidence: String((m as { evidence?: string }).evidence || ''),
+        }))
+    : []
+  const rejected: RejectedLookalike[] = Array.isArray(parsed.rejected_lookalikes)
+    ? parsed.rejected_lookalikes
+        .filter((r) => r && typeof r === 'object')
+        .map((r) => ({
+          segment: String(r.segment || ''),
+          chunk_range: String(r.chunk_range || ''),
+          reason: String(r.reason || ''),
+        }))
+    : []
+  // Derive chunk_segment from per-segment matches when the model omits the global range.
+  let chunkSegment = String(parsed.chunk_segment || '')
+  if (!chunkSegment && segmentMatches.length > 0) {
+    const starts = segmentMatches.map((m) => m.chunk_start).filter(Boolean).sort()
+    const ends = segmentMatches.map((m) => m.chunk_end).filter(Boolean).sort()
+    if (starts.length && ends.length) chunkSegment = `${starts[0]}-${ends[ends.length - 1]}`
+  }
   return {
     match: Boolean(parsed.match),
     confidence: Number(parsed.confidence) || 0,
     short_segment: String(parsed.short_segment || ''),
-    chunk_segment: String(parsed.chunk_segment || ''),
+    chunk_segment: chunkSegment,
     matched_segments: String(parsed.matched_segments || ''),
+    segment_matches: segmentMatches,
+    rejected_lookalikes: rejected,
     note: String(parsed.note || ''),
   }
 }
 
-const SEGMENT_PROMPT = `This is a copyright match tool. You are given ONE short video that was cut from a full movie.
+const SEGMENT_PROMPT = `You are a forensic video analyst working for a Copyright Match Tool. You are given ONE short video that was edited together from clips of a movie.
 
-Do two things:
+TASK: Split this short video into its individual scene segments (every cut = new segment), and write a FORENSIC-LEVEL description of each segment. These descriptions will later be used to locate the exact same footage inside the full movie, so they must be detailed enough that the segment can NEVER be confused with a similar-looking scene from the same movie.
 
-1. Identify WHICH MOVIE this short video is most likely from (title). If unsure, give your best guess and say "uncertain".
-2. Watch the video carefully and detect every SCENE CHANGE — points where the footage cuts to a different scene, shot, or location. The short may be edited: scenes that are together in the short might come from different places in the movie, and vice versa. Split the short into SEGMENTS, where each segment is one continuous piece of footage (one scene/shot that would be continuous in the source movie). Give segment boundaries with MILLISECOND precision.
+Analyze the video at 15 fps precision. All timestamps must be in mm:ss.mmm format (millisecond precision), and segment boundaries must be frame-accurate (aligned to 1/15s = 0.067s steps).
 
-Answer in strict JSON, nothing else:
-{"movie_guess": "movie title or 'uncertain'", "segments": [{"start": "mm:ss.mmm", "end": "mm:ss.mmm", "description": "one short sentence: what happens in this segment"}]}
+For EACH segment, describe ALL of the following:
+1. ACTION TIMELINE: exactly what happens from the first frame to the last frame, in order, with the timing of each movement (e.g. "boy takes 3 steps, kneels at 0.4s into the segment, grabs bottle with right hand at 0.9s").
+2. CAMERA: shot type (extreme close-up / close-up / medium / wide), angle (eye-level / low / high / overhead), and camera movement (static / pan left / zoom in / handheld shake), including WHERE in the segment the movement happens.
+3. SUBJECTS: every person/creature visible — position in frame, facing direction, clothing details, expressions, and how these CHANGE during the segment.
+4. START FRAME: precise description of the very first frame (who is where, pose, what is visible).
+5. END FRAME: precise description of the very last frame before the cut.
+6. BACKGROUND DETAILS: fixed objects and their positions, lighting direction, weather, colors, any on-screen text, and anything unique (a rock, a footprint, smoke shape) that can be used as a fingerprint.
+7. AUDIO: dialogue words (if any), music, sound effects during this segment.
+
+Output strict JSON only, nothing else:
+{
+  "movie_guess": "movie name or 'uncertain'",
+  "total_duration": "mm:ss.mmm",
+  "segments": [
+    {
+      "id": "S1",
+      "start": "mm:ss.mmm",
+      "end": "mm:ss.mmm",
+      "duration_seconds": 1.333,
+      "action_timeline": "...",
+      "camera": "...",
+      "subjects": "...",
+      "start_frame": "...",
+      "end_frame": "...",
+      "background_details": "...",
+      "audio": "..."
+    }
+  ]
+}
 
 Rules:
-- Timestamps use mm:ss.mmm (minutes:seconds.milliseconds), e.g. "00:04.320".
-- Segments must be in order, non-overlapping, and together cover the whole video.
-- Description should mention visual content (people, action, location, camera shot) so each segment is recognizable.`
+- Every cut in the video = a new segment. Do not merge two shots into one segment.
+- Segments must be contiguous: each segment's start = previous segment's end.
+- Do NOT skip any part of the video. The last segment must end at the video's total duration.
+- Write descriptions so specific that a different take of the same scene (same actors, same location, different moment) would FAIL to match them.`
 
 const SCAN_PROMPT_BASE = `This is a copyright match tool. You are given TWO videos.
 Video 1 is a SHORT VIDEO (the clip we are trying to locate).
@@ -140,12 +206,73 @@ Rules:
 function buildScanPrompt(segmentsText?: string, movieGuess?: string | null): string {
   if (!segmentsText) return SCAN_PROMPT_BASE
   const guessLine = movieGuess && movieGuess !== 'uncertain' ? `\nThe short video is believed to be from the movie: ${movieGuess}.` : ''
-  return `${SCAN_PROMPT_BASE}
+  return `You are a forensic video analyst working for a Copyright Match Tool. You are given TWO videos:
+- Video 1: a SHORT VIDEO edited from movie clips. It has already been analyzed and split into scene segments (provided below with forensic descriptions).
+- Video 2: a ONE-MINUTE CHUNK cut from the original movie.
 ${guessLine}
-The short video has already been analyzed and split into these scene segments:
+SEGMENTS OF THE SHORT VIDEO:
 ${segmentsText}
 
-Check EACH segment individually against this one-minute movie chunk. Report every segment that appears in this chunk in "matched_segments", and make "short_segment"/"chunk_segment" cover the matched footage.`
+TASK: For EACH segment, determine whether the IDENTICAL footage appears anywhere inside this one-minute chunk, and if it does, report the EXACT time range inside the chunk. You have BOTH videos in front of you — do NOT match based on the text descriptions alone. The descriptions only tell you WHAT to look for; the final decision must come from directly comparing the actual frames of Video 1 against the actual frames of Video 2.
+
+METHOD (follow strictly, segment by segment):
+1. Watch the segment in Video 1. Memorize its start frame, end frame, and action timeline.
+2. Scan Video 2 for footage that could contain this segment.
+3. If a candidate region is found, do a FRAME-BY-FRAME comparison:
+   a. START FRAME TEST: the first frame of the segment must be visually identical to a frame in the chunk — same pose, same framing, same background object positions.
+   b. END FRAME TEST: the last frame of the segment must also be identical to the corresponding chunk frame.
+   c. TIMELINE TEST: every action in between must unfold with the SAME timing and in the SAME order.
+   d. CAMERA TEST: identical shot type, angle, and camera movement at the same moments.
+   e. FINGERPRINT TEST: unique background details (object positions, extras, lighting, smoke shapes, on-screen text) must line up.
+4. A match is valid ONLY if ALL five tests pass. This must be the exact same take — the same recording, frame for frame.
+5. DURATION CHECK: the matched chunk range must have almost the same duration as the segment. If durations differ, check whether the short clip was slowed down or sped up, and report it in "speed". If durations differ and there is no speed change, it is NOT a valid match.
+
+CRITICAL WARNINGS:
+- Movies contain many similar-looking scenes: same actors, same location, same costumes, similar framing. These are NOT matches. A different moment or a different take of the same scene must be REJECTED even if it looks 90% similar.
+- Matching only on the description (e.g. "boy runs to bottle" appears in both) is FORBIDDEN. The frames themselves must be identical.
+- A false positive is much worse than a miss. When in doubt, leave it out.
+
+CONFIDENCE SCALE (per segment):
+- 95-100: all five tests passed, start and end frames verified identical.
+- 85-94: same take, minor uncertainty (e.g. compression artifacts).
+- Below 85: DO NOT report the segment at all.
+
+All timestamps in mm:ss.mmm (millisecond precision).
+
+Output strict JSON only, nothing else:
+{
+  "match": true,
+  "confidence": 0,
+  "matched_segments": "S1, S3",
+  "segment_matches": [
+    {
+      "segment": "S1",
+      "chunk_start": "mm:ss.mmm",
+      "chunk_end": "mm:ss.mmm",
+      "confidence": 96,
+      "speed": "1.0x",
+      "evidence": "which start/end frame details and fingerprints confirmed this exact take"
+    }
+  ],
+  "rejected_lookalikes": [
+    {
+      "segment": "S2",
+      "chunk_range": "mm:ss.mmm-mm:ss.mmm",
+      "reason": "same location and actor but different take: camera angle differs, background extra missing"
+    }
+  ],
+  "short_segment": "mm:ss-mm:ss",
+  "chunk_segment": "mm:ss-mm:ss",
+  "note": "one-line summary"
+}
+
+Rules:
+- "segment_matches" contains ONLY segments that passed all five tests with confidence >= 85.
+- "rejected_lookalikes" must list any similar-looking footage you found and WHY you rejected it — this proves you checked properly.
+- "match" is true if at least one segment passed.
+- "confidence" (top-level) = highest segment confidence, or 0 if nothing matched.
+- "short_segment" = the time range WITHIN the short video that matches; "chunk_segment" = the time range WITHIN this chunk covering all matched segments.
+- If nothing matches: {"match": false, "confidence": 0, "matched_segments": "", "segment_matches": [], "rejected_lookalikes": [], "short_segment": "", "chunk_segment": "", "note": "..."}`
 }
 
 const VERIFY_PROMPT = `This is a copyright match verification pass. You are given TWO short videos.
@@ -230,13 +357,45 @@ export async function segmentShortRequest(
       const end = raw.lastIndexOf('}')
       if (start >= 0 && end > start) raw = raw.slice(start, end + 1)
     }
-    const parsed = JSON.parse(raw) as { movie_guess?: string; segments?: { start?: string; end?: string; description?: string }[] }
+    interface RawForensicSegment {
+      id?: string
+      start?: string
+      end?: string
+      description?: string
+      action_timeline?: string
+      camera?: string
+      subjects?: string
+      start_frame?: string
+      end_frame?: string
+      background_details?: string
+      audio?: string
+    }
+    const parsed = JSON.parse(raw) as { movie_guess?: string; segments?: RawForensicSegment[] }
     const segments: ShortSegment[] = []
     for (const s of parsed.segments || []) {
       const start = toSecondsMs(String(s.start || ''))
       const end = toSecondsMs(String(s.end || ''))
       if (start === null || end === null || end <= start) continue
-      segments.push({ index: segments.length + 1, start, end, description: String(s.description || '').slice(0, 300) })
+      const hasForensic = Boolean(s.action_timeline || s.start_frame || s.end_frame)
+      segments.push({
+        index: segments.length + 1,
+        start,
+        end,
+        description: String(s.description || s.action_timeline || '').slice(0, 300),
+        ...(hasForensic
+          ? {
+              forensic: {
+                action_timeline: String(s.action_timeline || ''),
+                camera: String(s.camera || ''),
+                subjects: String(s.subjects || ''),
+                start_frame: String(s.start_frame || ''),
+                end_frame: String(s.end_frame || ''),
+                background_details: String(s.background_details || ''),
+                audio: String(s.audio || ''),
+              },
+            }
+          : {}),
+      })
     }
     if (segments.length === 0) throw new Error(`Segmentation returned no valid segments: ${text.slice(0, 200)}`)
     return { movieGuess: String(parsed.movie_guess || 'uncertain'), segments }
@@ -246,12 +405,28 @@ export async function segmentShortRequest(
   }
 }
 
-/** Render saved segments as prompt text, e.g. "S1: 00:00.000-00:04.320 — description". */
+/** Render saved segments as prompt text — forensic JSON when available, legacy lines otherwise. */
 export function segmentsToPromptText(segments: ShortSegment[]): string {
   const fmt = (sec: number) => {
     const m = Math.floor(sec / 60)
     const s = sec - m * 60
     return `${String(m).padStart(2, '0')}:${s.toFixed(3).padStart(6, '0')}`
+  }
+  const hasForensic = segments.some((s) => s.forensic)
+  if (hasForensic) {
+    return JSON.stringify(
+      {
+        segments: segments.map((s) => ({
+          id: `S${s.index}`,
+          start: fmt(s.start),
+          end: fmt(s.end),
+          duration_seconds: Number((s.end - s.start).toFixed(3)),
+          ...(s.forensic || { description: s.description }),
+        })),
+      },
+      null,
+      1,
+    )
   }
   return segments.map((s) => `S${s.index}: ${fmt(s.start)}-${fmt(s.end)} — ${s.description}`).join('\n')
 }

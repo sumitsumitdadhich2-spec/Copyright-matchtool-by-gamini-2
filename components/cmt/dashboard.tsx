@@ -12,6 +12,7 @@ import { ModelBoard } from './model-board'
 import { CandidatesPanel } from './candidates-panel'
 import { LogsPanel } from './logs-panel'
 import { ReportPanel } from './report-panel'
+import { ComparePanel } from './compare-panel'
 import { HistoryPanel } from './history-panel'
 
 interface ScanResponse {
@@ -123,6 +124,7 @@ export function Dashboard() {
           <ScanTimeline scan={scan || emptyScan()} />
           <ModelBoard scan={scan} usage={data?.usage || null} />
           {scan && scan.report && <ReportPanel scan={scan} />}
+          {scan && scan.regions.length > 0 && <ComparePanel scan={scan} />}
           {scan && <CandidatesPanel scan={scan} />}
           {scan && <LogsPanel scan={scan} />}
         </div>

@@ -369,6 +369,9 @@ class Scheduler {
             addLog(scan, 'info', `chunk ${chunkIndex}: low confidence ${result.confidence} (<${CONFIDENCE_THRESHOLD}) — treated as no match`)
           }
         }
+        for (const rl of result.rejected_lookalikes || []) {
+          addLog(scan, 'info', `chunk ${chunkIndex}: rejected lookalike ${rl.segment} @ ${rl.chunk_range} — ${rl.reason.slice(0, 120)}`)
+        }
       } catch (err) {
         const e = err instanceof GeminiError ? err : new GeminiError('other', err instanceof Error ? err.message : String(err))
         if (e.kind === 'rpd') {

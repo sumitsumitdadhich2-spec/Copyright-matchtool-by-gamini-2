@@ -8,13 +8,26 @@ export interface ChunkState {
   confidence?: number
 }
 
-/** One scene segment detected in the short video during the 20fps segmentation pass. */
+/** Forensic-level details captured for a segment during the segmentation pass. */
+export interface SegmentForensics {
+  action_timeline: string
+  camera: string
+  subjects: string
+  start_frame: string
+  end_frame: string
+  background_details: string
+  audio: string
+}
+
+/** One scene segment detected in the short video during the segmentation pass. */
 export interface ShortSegment {
   index: number
   /** seconds within the short video, millisecond precision */
   start: number
   end: number
   description: string
+  /** full forensic description used for exact-take matching in the scan prompt */
+  forensic?: SegmentForensics
 }
 
 export interface Candidate {
