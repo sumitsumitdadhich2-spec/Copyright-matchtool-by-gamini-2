@@ -8,7 +8,7 @@ import { probeDuration, chunkMovie, extractSegment } from '@/lib/ffmpeg'
 import { CHUNK_SECONDS } from '@/lib/models'
 
 export const runtime = 'nodejs'
-export const maxDuration = 800
+export const maxDuration = 300
 
 export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params
