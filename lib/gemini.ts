@@ -205,9 +205,7 @@ export async function segmentShortRequest(
       config: {
         responseMimeType: 'application/json',
         temperature: 0,
-        // 20 fps × 60s = 1200 frames. Default resolution (258 tok/frame) ≈ 310K tokens — OVER the 250K TPM cap.
-        // Low resolution (66 tok/frame) ≈ 81K tokens — fits comfortably.
-        mediaResolution: 'MEDIA_RESOLUTION_LOW' as never,
+        // 15 fps × 60s = 900 frames × 258 tok/frame ≈ 232K tokens — fits under the 250K TPM cap at default resolution.
       },
     })
     const text = resp.text

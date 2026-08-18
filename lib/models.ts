@@ -25,8 +25,9 @@ export const RATE_COOLDOWN_MS = 60_000
 /** Accept a chunk match only at or above this confidence. */
 export const CONFIDENCE_THRESHOLD = 85
 
-/** fps used for the one-time short-video segmentation pass (locked). */
-export const SEGMENT_FPS = 20
+/** fps used for the one-time short-video segmentation pass (locked).
+ * 15 fps × 60s = 900 frames × 258 tok/frame ≈ 232K tokens — fits under the 250K TPM cap at default resolution. */
+export const SEGMENT_FPS = 15
 
 /** fps used during the main scan (locked). */
 export const SCAN_FPS = 7
