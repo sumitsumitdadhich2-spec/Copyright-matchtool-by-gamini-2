@@ -13,6 +13,12 @@ interface Props {
 
 type Kind = 'short' | 'movie'
 
+const ALLOWED_EXT = ['.mp4', '.mov', '.mkv', '.webm']
+function isAllowedVideo(f: File) {
+  const name = f.name.toLowerCase()
+  return ALLOWED_EXT.some((ext) => name.endsWith(ext))
+}
+
 export function UploadPanel({ scan, onScanCreated, refresh }: Props) {
   const [uploading, setUploading] = useState<Kind | null>(null)
   const [progress, setProgress] = useState(0)
@@ -30,6 +36,10 @@ export function UploadPanel({ scan, onScanCreated, refresh }: Props) {
   }
 
   function uploadFile(kind: Kind, file: File) {
+    if (!isAllowedVideo(file)) {
+      setError('Only MP4, MOV, MKV or WebM video files are supported')
+      return
+    }
     setError(null)
     setUploading(kind)
     setProgress(0)
@@ -153,7 +163,7 @@ function Dropzone(props: {
       <input
         ref={inputRef}
         type="file"
-        accept="video/*,.mp4,.mov,.m4v,.mkv,.webm,.avi,.3gp,.3g2,.ts,.mts,.m2ts,.flv,.wmv,.mpg,.mpeg"
+        accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm"
         className="sr-only"
         onChange={(e) => {
           const f = e.target.files?.[0]
