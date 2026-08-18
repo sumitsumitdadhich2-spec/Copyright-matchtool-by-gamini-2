@@ -125,6 +125,7 @@ function Dropzone(props: {
   onFile: (f: File) => void
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
+  const allFilesInputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
   const done = Boolean(props.name && props.duration)
 
@@ -136,6 +137,7 @@ function Dropzone(props: {
   }
 
   return (
+    <div className="flex flex-col gap-1.5">
     <button
       type="button"
       onClick={() => inputRef.current?.click()}
@@ -161,6 +163,18 @@ function Dropzone(props: {
           e.target.value = ''
         }}
       />
+      {/* Unfiltered picker: opens the system Files app so every video is selectable, even ones the gallery picker greys out */}
+      <input
+        ref={allFilesInputRef}
+        type="file"
+        accept="*/*"
+        className="sr-only"
+        onChange={(e) => {
+          const f = e.target.files?.[0]
+          if (f) props.onFile(f)
+          e.target.value = ''
+        }}
+      />
       <div className="flex w-full items-center gap-2">
         <span className={done ? 'text-success' : 'text-primary'}>{done ? <CheckCircle2 className="size-5" aria-hidden /> : props.icon}</span>
         <span className="text-sm font-medium">{props.title}</span>
@@ -178,5 +192,14 @@ function Dropzone(props: {
         <span className="text-xs text-muted-foreground">{props.subtitle} — click or drop a file</span>
       )}
     </button>
+    <button
+      type="button"
+      disabled={props.disabled}
+      onClick={() => allFilesInputRef.current?.click()}
+      className="self-start text-xs text-primary underline underline-offset-2 hover:opacity-80 disabled:opacity-50"
+    >
+      Video not showing in gallery? Browse all files
+    </button>
+    </div>
   )
 }
