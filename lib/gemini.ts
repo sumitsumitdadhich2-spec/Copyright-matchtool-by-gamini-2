@@ -148,12 +148,17 @@ async function generate(
   ai: GoogleGenAI,
   model: string,
   parts: object[],
+  lowResolution = false,
 ): Promise<ChunkScanResult> {
   try {
     const resp = await ai.models.generateContent({
       model,
       contents: [{ role: 'user', parts: parts as never }],
-      config: { responseMimeType: 'application/json', temperature: 0 },
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0,
+        ...(lowResolution ? { mediaResolution: 'MEDIA_RESOLUTION_LOW' as never } : {}),
+      },
     })
     const text = resp.text
     if (!text) throw new Error('Empty model response')
@@ -197,7 +202,13 @@ export async function segmentShortRequest(
           ] as never,
         },
       ],
-      config: { responseMimeType: 'application/json', temperature: 0 },
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0,
+        // 20 fps × 60s = 1200 frames. Default resolution (258 tok/frame) ≈ 310K tokens — OVER the 250K TPM cap.
+        // Low resolution (66 tok/frame) ≈ 81K tokens — fits comfortably.
+        mediaResolution: 'MEDIA_RESOLUTION_LOW' as never,
+      },
     })
     const text = resp.text
     if (!text) throw new Error('Empty model response')
@@ -258,11 +269,18 @@ export async function verifyRequest(
   shortSegUri: string,
   movieSegUri: string,
 ): Promise<ChunkScanResult> {
-  return generate(ai, model, [
-    { fileData: { fileUri: shortSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
-    { fileData: { fileUri: movieSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
-    { text: VERIFY_PROMPT },
-  ])
+  // 14 fps at default resolution = ~3.6K tokens/sec of video → only ~69s combined fits in 250K TPM.
+  // Low resolution (~0.92K tokens/sec) allows ~4.5 minutes combined — required for longer regions.
+  return generate(
+    ai,
+    model,
+    [
+      { fileData: { fileUri: shortSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
+      { fileData: { fileUri: movieSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
+      { text: VERIFY_PROMPT },
+    ],
+    true,
+  )
 }
 
 /** Parse "mm:ss-mm:ss" (or h:mm:ss) into seconds tuple. Returns null when unparseable. */
