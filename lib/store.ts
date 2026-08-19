@@ -138,7 +138,6 @@ export function newScan(): Scan {
     logs: [],
     startedAt: null,
     finishedAt: null,
-    earlyStopped: false,
     error: null,
     report: null,
     modelStates: {},

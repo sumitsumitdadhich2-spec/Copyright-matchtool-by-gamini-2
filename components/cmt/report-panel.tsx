@@ -32,9 +32,6 @@ export function ReportPanel({ scan }: { scan: Scan }) {
       <div className="flex items-center gap-2">
         <FileCheck2 className="size-4 text-success" aria-hidden />
         <h2 className="text-sm font-semibold">Final Report</h2>
-        {report.earlyStopped && (
-          <span className="ml-auto rounded-full bg-success/15 px-2 py-0.5 text-xs text-success">early stop — full match</span>
-        )}
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">

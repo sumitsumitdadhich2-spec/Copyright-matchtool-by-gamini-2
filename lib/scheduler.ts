@@ -285,7 +285,6 @@ class Scheduler {
       chunksScanned: scan.chunks.filter((c) => c.status === 'match' || c.status === 'no_match').length,
       chunksFailed: scan.chunks.filter((c) => c.status === 'failed').length,
       modelsUsed: MODEL_POOL.filter((m) => job.lanes.some((l) => getModelUsage(m.id, l.apiKey) > 0)).map((m) => m.id),
-      earlyStopped: scan.earlyStopped,
       regions: scan.regions,
       segmentMatches: sms,
     }
@@ -781,6 +780,9 @@ class Scheduler {
             sm.verification.state = 'rejected_final'
             sm.verification.reason = reason
             addLog(scan, 'error', `S${sm.segmentIndex} REJECTED by Verifier (final, attempt ${sm.verification.attempts}): ${reason.slice(0, 180)}`)
+            // Promote a saved alternate window OR re-queue the chunks that skipped
+            // this segment while it was locked — the real match may be there.
+            this.onSegmentRejectedFinal(job, sm)
           } else {
             sm.verification.state = 'rescanning'
             sm.verification.reason = reason
@@ -798,6 +800,7 @@ class Scheduler {
         if (!seg) {
           sm.verification.state = 'rejected_final'
           sm.verification.reason = `${sm.verification.reason || ''} (re-scan impossible: segment data missing)`.trim()
+          this.onSegmentRejectedFinal(job, sm)
           return true
         }
         addLog(scan, 'info', `re-scan S${sm.segmentIndex} @13fps in chunk ${sm.chunkIndex} → ${m.id} (key ${lane.idx})`)
@@ -855,6 +858,9 @@ class Scheduler {
           sm.verification.state = 'rejected_final'
           sm.verification.reason = `${sm.verification.reason || 'verifier rejection'} | 13fps re-scan of chunk ${sm.chunkIndex} found no same-to-same window (${result.note?.slice(0, 120) || 'no note'})`
           addLog(scan, 'error', `S${sm.segmentIndex} REJECTED (final): re-scan found no valid window in chunk ${sm.chunkIndex}`)
+          // The window in THIS chunk is dead — promote an alternate from another chunk,
+          // or re-queue every chunk that skipped this segment so it keeps being hunted.
+          this.onSegmentRejectedFinal(job, sm)
         }
       }
       return true

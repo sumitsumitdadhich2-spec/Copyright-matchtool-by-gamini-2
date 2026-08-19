@@ -169,7 +169,6 @@ export interface ScanReport {
   chunksScanned: number
   chunksFailed: number
   modelsUsed: string[]
-  earlyStopped: boolean
   regions: MatchRegion[]
   /** final frame-by-frame per-segment map (exact durations) */
   segmentMatches?: SegmentMatch[]
@@ -199,7 +198,6 @@ export interface Scan {
   logs: LogEntry[]
   startedAt: number | null
   finishedAt: number | null
-  earlyStopped: boolean
   error: string | null
   report: ScanReport | null
   modelStates: Record<string, ModelLiveState>
