@@ -32,6 +32,33 @@ export interface ShortSegment {
   forensic?: SegmentForensics
 }
 
+/** Live per-segment verification state (2-key flow).
+ *  pending → verifying → confirmed | rejected(1st) → rescanning → verifying(2nd) → confirmed | rejected_final */
+export type SegmentVerifyState =
+  | 'pending'
+  | 'verifying'
+  | 'rescanning'
+  | 'confirmed'
+  | 'rejected_final'
+
+export interface SegmentVerification {
+  state: SegmentVerifyState
+  /** how many 24fps verification attempts have run for this segment */
+  attempts: number
+  /** confidence returned by the last verification */
+  confidence?: number
+  /** model that produced the last verdict */
+  model?: string
+  /** which API key lane ran the last verification: 1 = scanner key, 2 = verifier key */
+  keyLane?: 1 | 2
+  /** detailed visual rejection reason from the verifier (why it is NOT the same footage) */
+  reason?: string
+  /** verifier note on confirm */
+  note?: string
+  /** first (rejected) movie window kept for the report, before a rescan remapped it */
+  rejectedWindow?: [number, number]
+}
+
 /** Frame-accurate mapping of ONE short-video segment to its exact location in the movie.
  *  This is the final per-segment result: window durations are validated server-side to
  *  equal the segment's exact duration. Only the best (highest confidence) mapping per
@@ -50,6 +77,8 @@ export interface SegmentMatch {
   speed: string
   model: string
   chunkIndex: number
+  /** live 24fps verification result (2-key flow); absent = never queued */
+  verification?: SegmentVerification
 }
 
 export interface Candidate {

@@ -35,4 +35,12 @@ export const SCAN_FPS = 7
 /** fps used during the final verification pass (locked). */
 export const VERIFY_FPS = 14
 
+/** fps for LIVE per-segment verification (2-key flow). Both clips are short (<30s combined),
+ * so 24fps at default resolution stays well under the 250K TPM cap. */
+export const VERIFY_LIVE_FPS = 24
+
+/** fps for the 13fps RESCAN after a verifier rejection: full 1-minute chunk + the rejected
+ * short clip in one request. 13fps × ~65s combined ≈ 218K tokens — fits under 250K TPM. */
+export const RESCAN_FPS = 13
+
 export const CHUNK_SECONDS = 60

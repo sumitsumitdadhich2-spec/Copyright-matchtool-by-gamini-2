@@ -1,5 +1,5 @@
 import { GoogleGenAI } from '@google/genai'
-import { SCAN_FPS, VERIFY_FPS, SEGMENT_FPS } from './models'
+import { SCAN_FPS, VERIFY_FPS, SEGMENT_FPS, VERIFY_LIVE_FPS, RESCAN_FPS } from './models'
 import type { ShortSegment } from './types'
 
 export interface RawSegmentMatch {
@@ -609,6 +609,161 @@ export async function verifyRequest(
     ],
     true,
   )
+}
+
+// ---------- LIVE per-segment verification (2-key flow) ----------
+
+export interface LiveVerifyResult {
+  verdict: 'CONFIRM' | 'REJECT'
+  confidence: number
+  /** detailed visual reason — REQUIRED on REJECT (what differs: scene, subjects, motion, timing...) */
+  reason: string
+  note: string
+}
+
+const LIVE_VERIFY_PROMPT = `This is a STRICT frame-by-frame copyright verification at 24 fps. You are given TWO short clips:
+Video 1 = a segment cut from a SHORT VIDEO. Video 2 = the window cut from a MOVIE where a scan claims the SAME footage sits.
+
+If the claim is correct these clips are the SAME recording playing in parallel: frame 1 of Video 1 corresponds to frame 1 of Video 2, and every action, cut and camera move happens at the same offset in both.
+
+METHOD (all mandatory):
+1. FIRST FRAME: compare the very first frames — same shot, same pose, same background object positions.
+2. LAST FRAME: compare the very last frames the same way.
+3. PARALLEL TIMELINE: step through both clips together at 24 fps — every movement must occur at the SAME time offset.
+4. FINGERPRINTS: at least one unique visual detail (background object, on-screen text, an extra, lighting shape) must be present in BOTH clips at the same moment.
+5. Aspect-ratio crops (vertical reframing) and color grading/filters are ACCEPTABLE differences. Different takes, different moments, different scenes, or timing drift are NOT.
+
+The scan that produced this claim may be WRONG (models sometimes echo timestamps without comparing frames). Your job is to try to DISPROVE the match. Only CONFIRM when checks 1-4 genuinely pass.
+
+VERDICT RULES:
+- "CONFIRM" ONLY if this is verifiably the same recording frame for frame (confidence 90-100).
+- Otherwise "REJECT" — and "reason" MUST spell out exactly WHAT is visually different and WHERE: scene, subjects, clothing, motion, timing offset, camera angle, background objects, on-screen text. Never leave the reason vague; the user reads it to judge the rejection.
+
+Answer in strict JSON, nothing else:
+{"verdict": "CONFIRM" or "REJECT", "confidence": 0-100, "reason": "detailed visual reason (mandatory on REJECT, empty string on CONFIRM)", "note": "one concrete visual detail you verified or refuted in BOTH clips"}`
+
+/** LIVE verification: matched short clip vs matched movie window at 24 fps, one request.
+ *  Combined duration is always < 30s so default resolution fits the TPM cap. */
+export async function liveVerifyRequest(
+  ai: GoogleGenAI,
+  model: string,
+  shortClipUri: string,
+  movieClipUri: string,
+): Promise<LiveVerifyResult> {
+  try {
+    const resp = await ai.models.generateContent({
+      model,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { fileData: { fileUri: shortClipUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_LIVE_FPS } },
+            { fileData: { fileUri: movieClipUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_LIVE_FPS } },
+            { text: LIVE_VERIFY_PROMPT },
+          ] as never,
+        },
+      ],
+      config: { responseMimeType: 'application/json', temperature: 0 },
+    })
+    const text = resp.text
+    if (!text) throw new Error('Empty model response')
+    const parsed = tolerantJsonParse<Partial<LiveVerifyResult>>(extractJsonBlock(text))
+    const verdict = String(parsed.verdict || '').toUpperCase() === 'CONFIRM' ? 'CONFIRM' : 'REJECT'
+    return {
+      verdict,
+      confidence: Number(parsed.confidence) || 0,
+      reason: String(parsed.reason || ''),
+      note: String(parsed.note || ''),
+    }
+  } catch (err) {
+    if (err instanceof GeminiError) throw err
+    throw classifyError(err)
+  }
+}
+
+/** Context handed to the 13fps rescan after a verifier rejection. */
+export interface RescanHistory {
+  segmentIndex: number
+  segmentDuration: number
+  /** forensic prompt text describing ONLY this segment */
+  segmentText: string
+  /** the first (rejected) window inside the chunk, seconds */
+  firstWindow: [number, number]
+  firstConfidence: number
+  /** verifier's detailed rejection reason */
+  rejectionReason: string
+  movieGuess?: string | null
+}
+
+function buildRescanPrompt(h: RescanHistory): string {
+  const fmtT = (sec: number) => {
+    const m = Math.floor(sec / 60)
+    const s = sec - m * 60
+    return `${String(m).padStart(2, '0')}:${s.toFixed(3).padStart(6, '0')}`
+  }
+  const guessLine = h.movieGuess && h.movieGuess !== 'uncertain' ? `\nThe clip is believed to be from the movie: ${h.movieGuess}.` : ''
+  return `You are a forensic video analyst for a Copyright Match Tool doing a RE-CHECK after a failed verification. You are given TWO videos:
+- Video 1: ONE short clip (segment S${h.segmentIndex} of a short video) with EXACT duration ${h.segmentDuration.toFixed(3)}s.
+- Video 2: the SAME one-minute movie chunk that was scanned before.
+${guessLine}
+SEGMENT DESCRIPTION (from the original forensic analysis):
+${h.segmentText}
+
+HISTORY — WHY YOU ARE RE-CHECKING:
+- A previous scan of this exact chunk mapped segment S${h.segmentIndex} to the window ${fmtT(h.firstWindow[0])}-${fmtT(h.firstWindow[1])} (confidence ${h.firstConfidence}).
+- An independent 24fps frame-by-frame verification then REJECTED that mapping. The verifier's reason was:
+"${h.rejectionReason || 'no reason recorded'}"
+- So the window ${fmtT(h.firstWindow[0])}-${fmtT(h.firstWindow[1])} is either WRONG or misaligned. Do NOT simply repeat it unless you can refute the verifier's reason with concrete frame evidence.
+
+TASK: Search this ENTIRE one-minute chunk again, frame by frame, for the SAME-TO-SAME footage of Video 1 — the exact same take, the same recording. Pay special attention to what the verifier said was different, and make sure your new window does not have that problem.
+
+DURATION LOCK: the matched window MUST be EXACTLY ${h.segmentDuration.toFixed(3)}s long (chunk_end - chunk_start = ${h.segmentDuration.toFixed(3)}s within ±0.10s), unless there is a verified speed change (report it in "speed" with the scaled duration justified).
+
+METHOD (strict):
+1. Memorize Video 1: start frame, end frame, action timeline.
+2. Scan Video 2 completely — do not stop at the first lookalike.
+3. For every candidate window run: START FRAME TEST, END FRAME TEST, TIMELINE TEST, CAMERA TEST, FINGERPRINT TEST (unique background details must line up).
+4. A match is valid ONLY if all five tests pass — the exact same take, frame for frame.
+5. If the correct window is genuinely NOT in this chunk, say so — an honest "no match" is correct. A false positive is much worse than a miss.
+
+CONFIDENCE (strict): 90+ only when all tests pass with frame-level certainty. Below 90 = report no match.
+
+Output strict JSON only, nothing else:
+{
+  "match": true or false,
+  "confidence": 0-100,
+  "segment_matches": [
+    {"segment": "S${h.segmentIndex}", "chunk_start": "mm:ss.mmm", "chunk_end": "mm:ss.mmm", "confidence": 0-100, "speed": "1.0x", "evidence": "concrete start/end frame fingerprints you saw in VIDEO 2"}
+  ],
+  "rejected_lookalikes": [{"segment": "S${h.segmentIndex}", "chunk_range": "mm:ss.mmm-mm:ss.mmm", "reason": "why rejected"}],
+  "short_segment": "",
+  "chunk_segment": "",
+  "note": "one short sentence"
+}
+If nothing matches: {"match": false, "confidence": 0, "segment_matches": [], "rejected_lookalikes": [...], "short_segment": "", "chunk_segment": "", "note": "..."}`
+}
+
+/** 13fps RESCAN after a verifier rejection: full 1-minute chunk + rejected short clip + history, one request. */
+export async function rescanSegmentRequest(
+  ai: GoogleGenAI,
+  model: string,
+  shortClipUri: string,
+  chunkUri: string,
+  history: RescanHistory,
+): Promise<ChunkScanResult> {
+  return generate(ai, model, [
+    { fileData: { fileUri: shortClipUri, mimeType: 'video/mp4' }, videoMetadata: { fps: RESCAN_FPS } },
+    { fileData: { fileUri: chunkUri, mimeType: 'video/mp4' }, videoMetadata: { fps: RESCAN_FPS } },
+    { text: buildRescanPrompt(history) },
+  ])
+}
+
+/** Render ONE segment's forensic description for the rescan prompt. */
+export function singleSegmentPromptText(seg: ShortSegment): string {
+  if (seg.forensic) {
+    return JSON.stringify({ id: `S${seg.index}`, duration_seconds: Number((seg.end - seg.start).toFixed(3)), ...seg.forensic }, null, 1)
+  }
+  return `S${seg.index} (${(seg.end - seg.start).toFixed(3)}s): ${seg.description}`
 }
 
 /** A segment match that passed server-side duration validation. */

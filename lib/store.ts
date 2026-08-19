@@ -36,13 +36,30 @@ function writeJSON(file: string, data: unknown) {
 
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json')
 
+interface Settings {
+  apiKey?: string
+  apiKey2?: string
+}
+
 export function getApiKey(): string | null {
-  const s = readJSON<{ apiKey?: string }>(SETTINGS_FILE, {})
+  const s = readJSON<Settings>(SETTINGS_FILE, {})
   return s.apiKey || null
 }
 
+/** Second API key (Verifier lane). Optional — verification falls back to key 1 when absent. */
+export function getApiKey2(): string | null {
+  const s = readJSON<Settings>(SETTINGS_FILE, {})
+  return s.apiKey2 || null
+}
+
 export function setApiKey(apiKey: string) {
-  writeJSON(SETTINGS_FILE, { apiKey })
+  const s = readJSON<Settings>(SETTINGS_FILE, {})
+  writeJSON(SETTINGS_FILE, { ...s, apiKey })
+}
+
+export function setApiKey2(apiKey2: string) {
+  const s = readJSON<Settings>(SETTINGS_FILE, {})
+  writeJSON(SETTINGS_FILE, { ...s, apiKey2 })
 }
 
 export function apiKeyHash(apiKey: string): string {

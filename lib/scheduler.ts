@@ -1,4 +1,5 @@
 import path from 'node:path'
+import fs from 'node:fs'
 import crypto from 'node:crypto'
 import type { GoogleGenAI } from '@google/genai'
 import type { Scan, Candidate, MatchRegion, SegmentMatch } from './types'
@@ -16,6 +17,7 @@ import {
   saveScan,
   addLog,
   getApiKey,
+  getApiKey2,
   getModelUsage,
   incrementModelUsage,
   setModelExhausted,
@@ -29,24 +31,50 @@ import {
   scanChunkRequest,
   segmentShortRequest,
   segmentsToPromptText,
+  singleSegmentPromptText,
   verifyRequest,
+  liveVerifyRequest,
+  rescanSegmentRequest,
   parseSegment,
   enforceSegmentDurations,
   GeminiError,
+  type RescanHistory,
 } from './gemini'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+/** One API key lane. Lane 1 = Main Scanner key, Lane 2 = Verifier key.
+ *  Gemini Files API uploads are PER KEY, so each lane keeps its own short-video URI. */
+interface KeyLane {
+  idx: 1 | 2
+  apiKey: string
+  ai: GoogleGenAI
+  shortUri: string | null
+  /** in-flight upload lock so two workers never double-upload the short video */
+  shortUriPromise: Promise<string> | null
+}
+
+/** A queued verification job for ONE short-video segment. */
+interface VerifyTask {
+  kind: 'verify' | 'rescan'
+  segmentIndex: number
+}
+
 interface Job {
   scan: Scan
-  ai: GoogleGenAI
-  apiKey: string
+  lanes: KeyLane[]
+  /** scan-phase chunk queue */
   queue: number[]
   inFlight: Set<number>
+  /** live verification task queue (verify @24fps / rescan @13fps) */
+  verifyQueue: VerifyTask[]
+  verifyInFlight: Set<number>
+  /** transient error counter per segment so a flaky segment can't loop forever */
+  verifyErrors: Record<number, number>
   stopping: boolean
   earlyStop: boolean
-  shortUri: string | null
   segmentsText: string | null
+  /** rate-limit state keyed by `${laneIdx}|${modelId}` */
   lastRequestAt: Record<string, number>
   cooldownUntil: Record<string, number>
   dirty: boolean
@@ -64,6 +92,7 @@ class Scheduler {
     if (this.jobs.has(scanId)) return { ok: false, error: 'Scan already running' }
     const apiKey = getApiKey()
     if (!apiKey) return { ok: false, error: 'No Gemini API key configured. Add it in Settings first.' }
+    const apiKey2 = getApiKey2()
     const scan = getScan(scanId)
     if (!scan) return { ok: false, error: 'Scan not found' }
     if (!scan.shortDuration || !scan.movieDuration || scan.chunkCount === 0) {
@@ -76,24 +105,50 @@ class Scheduler {
       if (resume && c.status === 'cancelled') c.status = 'pending'
     }
     const queue = scan.chunks.filter((c) => c.status === 'pending').map((c) => c.index)
-    if (queue.length === 0 && scan.status !== 'stopped') {
+
+    // Rebuild the verification queue from persisted per-segment states (resume-safe).
+    const verifyQueue: VerifyTask[] = []
+    for (const sm of scan.segmentMatches || []) {
+      const v = sm.verification
+      if (!v) continue
+      if (v.state === 'verifying') v.state = 'pending'
+      if (v.state === 'pending') verifyQueue.push({ kind: 'verify', segmentIndex: sm.segmentIndex })
+      else if (v.state === 'rescanning') verifyQueue.push({ kind: 'rescan', segmentIndex: sm.segmentIndex })
+    }
+
+    if (queue.length === 0 && verifyQueue.length === 0 && scan.status !== 'stopped') {
       return { ok: false, error: 'No pending chunks to scan.' }
     }
 
     scan.status = 'scanning'
     scan.error = null
     if (!scan.startedAt) scan.startedAt = Date.now()
-    addLog(scan, 'info', resume ? `Resuming scan: ${queue.length} chunks pending` : `Scan started: ${queue.length} chunks queued across ${MODEL_POOL.length} models`)
+
+    const lanes: KeyLane[] = [{ idx: 1, apiKey, ai: getClient(apiKey), shortUri: null, shortUriPromise: null }]
+    if (apiKey2 && apiKey2 !== apiKey) {
+      lanes.push({ idx: 2, apiKey: apiKey2, ai: getClient(apiKey2), shortUri: null, shortUriPromise: null })
+    }
+
+    addLog(
+      scan,
+      'info',
+      resume
+        ? `Resuming: ${queue.length} chunk(s) + ${verifyQueue.length} verification(s) pending`
+        : `Scan started: ${queue.length} chunks queued across ${MODEL_POOL.length} models × ${lanes.length} API key(s)`,
+    )
+    if (lanes.length === 2) addLog(scan, 'info', 'Key 2 (Verifier) active — live 24fps verification runs in parallel; free keys share all work')
+    else addLog(scan, 'warn', 'No Key 2 set — Key 1 will also handle 24fps verification when it is free')
 
     const job: Job = {
       scan,
-      ai: getClient(apiKey),
-      apiKey,
+      lanes,
       queue,
       inFlight: new Set(),
+      verifyQueue,
+      verifyInFlight: new Set(),
+      verifyErrors: {},
       stopping: false,
       earlyStop: false,
-      shortUri: null,
       segmentsText: null,
       lastRequestAt: {},
       cooldownUntil: {},
@@ -136,29 +191,54 @@ class Scheduler {
     job.dirty = true
   }
 
-  private modelState(job: Job, m: ModelSpec) {
-    const used = getModelUsage(m.id, job.apiKey)
-    if (!job.scan.modelStates[m.id]) {
-      job.scan.modelStates[m.id] = { state: 'idle', currentChunk: null, cooldownUntil: null, usedToday: used }
+  /** modelStates key: lane 1 uses the plain model id (drives the Model Pool board);
+   *  lane 2 keeps its own suffixed entry so the two keys never overwrite each other. */
+  private stateKey(lane: KeyLane, m: ModelSpec) {
+    return lane.idx === 1 ? m.id : `${m.id}@2`
+  }
+
+  private rateKey(lane: KeyLane, m: ModelSpec) {
+    return `${lane.idx}|${m.id}`
+  }
+
+  private modelState(job: Job, lane: KeyLane, m: ModelSpec) {
+    const key = this.stateKey(lane, m)
+    const used = getModelUsage(m.id, lane.apiKey)
+    if (!job.scan.modelStates[key]) {
+      job.scan.modelStates[key] = { state: 'idle', currentChunk: null, cooldownUntil: null, usedToday: used }
     }
-    const s = job.scan.modelStates[m.id]
+    const s = job.scan.modelStates[key]
     s.usedToday = used
     return s
   }
 
+  /** Upload the short video once per key lane (Files API uploads are per key). */
+  private async ensureShortUri(job: Job, lane: KeyLane): Promise<string> {
+    if (lane.shortUri) return lane.shortUri
+    if (!lane.shortUriPromise) {
+      lane.shortUriPromise = (async () => {
+        addLog(job.scan, 'info', `Uploading short video to Gemini Files API (key ${lane.idx})...`)
+        this.mark(job)
+        const f = await uploadVideo(lane.ai, path.join(scanMediaDir(job.scan.id), 'short.mp4'))
+        lane.shortUri = f.uri
+        addLog(job.scan, 'success', `Short video ready on Gemini (key ${lane.idx})`)
+        this.mark(job)
+        return f.uri
+      })().catch((err) => {
+        lane.shortUriPromise = null
+        throw err
+      })
+    }
+    return lane.shortUriPromise
+  }
+
   private async runScan(job: Job) {
     const { scan } = job
-    const mediaDir = scanMediaDir(scan.id)
 
-    // Upload the short video once; every request reuses its URI.
-    addLog(scan, 'info', 'Uploading short video to Gemini Files API...')
-    this.mark(job)
-    const shortFile = await uploadVideo(job.ai, path.join(mediaDir, 'short.mp4'))
-    job.shortUri = shortFile.uri
-    addLog(scan, 'success', 'Short video ready on Gemini')
-    this.mark(job)
+    // Upload the short video for lane 1 up front (segmentation + scans reuse it).
+    await this.ensureShortUri(job, job.lanes[0])
 
-    // Phase 1: one-time segmentation pass (20 fps). Reuses saved segments on resume.
+    // Phase 1: one-time segmentation pass. Reuses saved segments on resume.
     if (scan.shortSegments && scan.shortSegments.length > 0) {
       job.segmentsText = segmentsToPromptText(scan.shortSegments)
       addLog(scan, 'info', `Reusing ${scan.shortSegments.length} saved segment(s) from previous run`)
@@ -167,19 +247,27 @@ class Scheduler {
     }
     this.mark(job)
 
-    // One worker per model, all pulling from the shared queue in parallel.
-    await Promise.all(MODEL_POOL.map((m) => this.worker(job, m)))
+    // One worker per (key lane × model), all pulling from the shared queues in parallel.
+    // Lane 1 prefers scan chunks, lane 2 prefers verifications — whichever is free
+    // picks up whatever work is left, so no key ever sits idle.
+    const workers: Promise<void>[] = []
+    for (const lane of job.lanes) {
+      for (const m of MODEL_POOL) workers.push(this.worker(job, lane, m))
+    }
+    await Promise.all(workers)
 
-    // Scan phase over. Persist final chunk states.
-    for (const m of MODEL_POOL) {
-      const s = this.modelState(job, m)
-      if (s.state === 'active' || s.state === 'waiting') s.state = 'idle'
-      s.currentChunk = null
+    // All phases over. Persist final model states.
+    for (const lane of job.lanes) {
+      for (const m of MODEL_POOL) {
+        const s = this.modelState(job, lane, m)
+        if (s.state === 'active' || s.state === 'waiting') s.state = 'idle'
+        s.currentChunk = null
+      }
     }
 
     if (job.stopping && !job.earlyStop) {
       scan.status = 'stopped'
-      addLog(scan, 'warn', `Scan stopped. ${job.queue.length + scan.chunks.filter((c) => c.status === 'pending').length > 0 ? 'Pending chunks saved — use Resume to continue.' : ''}`)
+      addLog(scan, 'warn', 'Scan stopped. Pending chunks/verifications saved — use Resume to continue.')
       this.finish(job)
       return
     }
@@ -190,8 +278,13 @@ class Scheduler {
       scan.earlyStopped = true
     }
 
-    // Build merged regions and run the final 14fps verification pass.
+    // Build merged regions from the (now live-verified) segment map.
     await this.verificationPass(job)
+
+    const sms = scan.segmentMatches || []
+    const confirmed = sms.filter((s) => s.verification?.state === 'confirmed').length
+    const rejected = sms.filter((s) => s.verification?.state === 'rejected_final').length
+    const pendingV = sms.filter((s) => s.verification && !['confirmed', 'rejected_final'].includes(s.verification.state)).length
 
     scan.status = 'done'
     scan.finishedAt = Date.now()
@@ -199,37 +292,42 @@ class Scheduler {
       totalScanTimeMs: scan.finishedAt - (scan.startedAt || scan.finishedAt),
       chunksScanned: scan.chunks.filter((c) => c.status === 'match' || c.status === 'no_match').length,
       chunksFailed: scan.chunks.filter((c) => c.status === 'failed').length,
-      modelsUsed: MODEL_POOL.filter((m) => getModelUsage(m.id, job.apiKey) > 0).map((m) => m.id),
+      modelsUsed: MODEL_POOL.filter((m) => job.lanes.some((l) => getModelUsage(m.id, l.apiKey) > 0)).map((m) => m.id),
       earlyStopped: scan.earlyStopped,
       regions: scan.regions,
-      segmentMatches: scan.segmentMatches || [],
+      segmentMatches: sms,
     }
-    addLog(scan, 'success', `Scan complete: ${scan.regions.filter((r) => r.selected).length} final match region(s)`) 
-    cleanupChunks(path.join(mediaDir, 'chunks'))
+    if (sms.length > 0) {
+      addLog(scan, 'success', `Verification summary: ${confirmed} confirmed · ${rejected} rejected · ${pendingV} pending`)
+    }
+    addLog(scan, 'success', `Scan complete: ${scan.regions.filter((r) => r.selected).length} final match region(s)`)
+    cleanupChunks(path.join(scanMediaDir(scan.id), 'chunks'))
     addLog(scan, 'info', 'Temporary chunk files cleaned up')
     this.finish(job)
   }
 
-  /** Phase 1: send the whole short video at 20 fps → movie guess + millisecond scene segments. */
+  /** Phase 1: send the whole short video at 15 fps → movie guess + millisecond scene segments. */
   private async segmentShort(job: Job) {
     const { scan } = job
+    const lane = job.lanes[0]
     addLog(scan, 'info', `Segmentation pass: analyzing short video at ${SEGMENT_FPS} fps (movie ID + scene changes)...`)
     this.mark(job)
     const tried = new Set<string>()
     for (let attempt = 0; attempt < 4; attempt++) {
       // Rotate models between attempts — a model that returned broken JSON once
       // will usually return the same broken JSON again at temperature 0.
-      const model = await this.pickVerifyModel(job, tried)
+      const model = this.pickFreeModel(job, lane, tried)
       if (!model) break
       tried.add(model.id)
       try {
-        const wait = (job.lastRequestAt[model.id] || 0) + MODEL_MIN_INTERVAL_MS - Date.now()
+        const rk = this.rateKey(lane, model)
+        const wait = (job.lastRequestAt[rk] || 0) + MODEL_MIN_INTERVAL_MS - Date.now()
         if (wait > 0) await sleep(wait)
-        job.lastRequestAt[model.id] = Date.now()
-        const used = incrementModelUsage(model.id, job.apiKey)
-        this.modelState(job, model).usedToday = used
+        job.lastRequestAt[rk] = Date.now()
+        const used = incrementModelUsage(model.id, lane.apiKey)
+        this.modelState(job, lane, model).usedToday = used
         this.mark(job)
-        const result = await segmentShortRequest(job.ai, model.id, job.shortUri!)
+        const result = await segmentShortRequest(lane.ai, model.id, lane.shortUri!)
         scan.movieGuess = result.movieGuess
         scan.shortSegments = result.segments
         job.segmentsText = segmentsToPromptText(result.segments)
@@ -241,8 +339,8 @@ class Scheduler {
         return
       } catch (err) {
         const e = err instanceof GeminiError ? err : new GeminiError('other', err instanceof Error ? err.message : String(err))
-        if (e.kind === 'rpd' || e.kind === 'unavailable') setModelExhausted(model.id, job.apiKey, model.rpd)
-        else if (e.kind === 'rate') job.cooldownUntil[model.id] = Date.now() + RATE_COOLDOWN_MS
+        if (e.kind === 'rpd' || e.kind === 'unavailable') setModelExhausted(model.id, lane.apiKey, model.rpd)
+        else if (e.kind === 'rate') job.cooldownUntil[this.rateKey(lane, model)] = Date.now() + RATE_COOLDOWN_MS
         addLog(scan, 'warn', `Segmentation attempt ${attempt + 1}/4 failed on ${model.id}: ${e.message.slice(0, 120)}`)
         this.mark(job)
       }
@@ -257,27 +355,41 @@ class Scheduler {
     this.jobs.delete(job.scan.id)
   }
 
-  private async worker(job: Job, m: ModelSpec) {
+  /** Queue a segment for live 24fps verification (idempotent — never double-queues). */
+  private enqueueVerify(job: Job, segmentIndex: number, kind: VerifyTask['kind'] = 'verify') {
+    if (job.verifyInFlight.has(segmentIndex)) return
+    if (job.verifyQueue.some((t) => t.segmentIndex === segmentIndex)) return
+    job.verifyQueue.push({ kind, segmentIndex })
+  }
+
+  /** True when the scan phase is fully finished (no chunks queued or in flight). */
+  private scanPhaseDone(job: Job) {
+    return (job.queue.length === 0 || job.earlyStop) && job.inFlight.size === 0
+  }
+
+  /** Unified worker: one per (key lane × model). Picks work by lane priority —
+   *  lane 1: scan chunks first, then verifications; lane 2: verifications first,
+   *  then scan chunks. Exits only when BOTH queues are fully drained. */
+  private async worker(job: Job, lane: KeyLane, m: ModelSpec) {
     const { scan } = job
-    const mediaDir = path.join(scanMediaDir(scan.id), 'chunks')
 
     while (true) {
-      if (job.stopping || job.earlyStop) return
-      const st = this.modelState(job, m)
+      if (job.stopping) return
+      const st = this.modelState(job, lane, m)
 
       // RPD check — never send request N+1 past the daily cap.
-      if (getModelUsage(m.id, job.apiKey) >= m.rpd) {
+      if (getModelUsage(m.id, lane.apiKey) >= m.rpd) {
         if (st.state !== 'exhausted') {
           st.state = 'exhausted'
           st.currentChunk = null
-          addLog(scan, 'warn', `${m.id} exhausted for today (${m.rpd}/${m.rpd} RPD) — removed from pool`)
+          addLog(scan, 'warn', `${m.id} (key ${lane.idx}) exhausted for today (${m.rpd}/${m.rpd} RPD) — removed from pool`)
           this.mark(job)
         }
         return
       }
 
       // Cooldown check (RPM/TPM-type 429).
-      const cool = job.cooldownUntil[m.id] || 0
+      const cool = job.cooldownUntil[this.rateKey(lane, m)] || 0
       if (cool > Date.now()) {
         st.state = 'cooling'
         st.cooldownUntil = cool
@@ -288,14 +400,32 @@ class Scheduler {
       }
       st.cooldownUntil = null
 
-      // Pull next chunk from the shared queue.
-      const chunkIndex = job.queue.shift()
-      if (chunkIndex === undefined) {
-        if (job.inFlight.size === 0) {
+      // ----- Work selection (per-lane priority, free key takes any pending work) -----
+      const canScan = !job.earlyStop && job.queue.length > 0
+      const canVerify = job.verifyQueue.length > 0
+      let verifyTask: VerifyTask | null = null
+      let chunkIndex: number | undefined
+
+      if (lane.idx === 2) {
+        if (canVerify) verifyTask = job.verifyQueue.shift() || null
+        else if (canScan) chunkIndex = job.queue.shift()
+      } else {
+        if (canScan) chunkIndex = job.queue.shift()
+        else if (canVerify) verifyTask = job.verifyQueue.shift() || null
+      }
+
+      if (verifyTask === null && chunkIndex === undefined) {
+        // Nothing to grab right now. Exit only when everything is fully drained.
+        if (this.scanPhaseDone(job) && job.verifyQueue.length === 0 && job.verifyInFlight.size === 0) {
           st.state = 'idle'
           st.currentChunk = null
           this.mark(job)
           return
+        }
+        // Scan chunks done but verifications still running → surface it in the status.
+        if (this.scanPhaseDone(job) && scan.status === 'scanning') {
+          scan.status = 'verifying'
+          this.mark(job)
         }
         st.state = 'waiting'
         this.mark(job)
@@ -303,43 +433,54 @@ class Scheduler {
         continue
       }
 
-      // Enforce 1 request/minute per model (TPM is the real limiter).
-      const wait = (job.lastRequestAt[m.id] || 0) + MODEL_MIN_INTERVAL_MS - Date.now()
+      // Enforce 1 request/minute per (key, model) — TPM is the real limiter.
+      const rk = this.rateKey(lane, m)
+      const wait = (job.lastRequestAt[rk] || 0) + MODEL_MIN_INTERVAL_MS - Date.now()
       if (wait > 0) {
         st.state = 'waiting'
-        st.currentChunk = chunkIndex
+        st.currentChunk = chunkIndex ?? null
         this.mark(job)
         let remaining = wait
-        while (remaining > 0 && !job.stopping && !job.earlyStop) {
+        while (remaining > 0 && !job.stopping) {
           const step = Math.min(1000, remaining)
           await sleep(step)
           remaining -= step
         }
-        if (job.stopping || job.earlyStop) {
-          job.queue.unshift(chunkIndex)
+        if (job.stopping) {
+          if (chunkIndex !== undefined) job.queue.unshift(chunkIndex)
+          if (verifyTask) job.verifyQueue.unshift(verifyTask)
           return
         }
       }
 
-      const chunk = scan.chunks[chunkIndex]
+      if (verifyTask) {
+        const keepWorker = await this.runVerifyTask(job, lane, m, verifyTask)
+        if (!keepWorker) return
+        continue
+      }
+
+      // ----- Scan one chunk (unchanged core flow) -----
+      const idx = chunkIndex!
+      const chunk = scan.chunks[idx]
       chunk.status = 'scanning'
       chunk.model = m.id
       chunk.attempts += 1
       st.state = 'active'
-      st.currentChunk = chunkIndex
-      job.inFlight.add(chunkIndex)
-      job.lastRequestAt[m.id] = Date.now()
-      const used = incrementModelUsage(m.id, job.apiKey)
+      st.currentChunk = idx
+      job.inFlight.add(idx)
+      job.lastRequestAt[rk] = Date.now()
+      const used = incrementModelUsage(m.id, lane.apiKey)
       st.usedToday = used
-      addLog(scan, 'info', `chunk ${chunkIndex} → ${m.id} (${used}/${m.rpd} today)`)
+      addLog(scan, 'info', `chunk ${idx} → ${m.id} (key ${lane.idx}, ${used}/${m.rpd} today)`)
       this.mark(job)
 
       let uploadedName: string | null = null
       try {
-        const chunkFile = chunkPath(mediaDir, chunkIndex)
-        const uploaded = await uploadVideo(job.ai, chunkFile)
+        const shortUri = await this.ensureShortUri(job, lane)
+        const chunkFile = chunkPath(path.join(scanMediaDir(scan.id), 'chunks'), idx)
+        const uploaded = await uploadVideo(lane.ai, chunkFile)
         uploadedName = uploaded.name
-        const result = await scanChunkRequest(job.ai, m.id, job.shortUri!, uploaded.uri, job.segmentsText || undefined, job.scan.movieGuess)
+        const result = await scanChunkRequest(lane.ai, m.id, shortUri, uploaded.uri, job.segmentsText || undefined, job.scan.movieGuess)
 
         // Server-side false-positive filter: when segments exist, the model's answer is
         // ONLY trusted if it reported per-segment windows of the segment's EXACT duration.
@@ -347,7 +488,7 @@ class Scheduler {
         const enforced = segs.length > 0 ? enforceSegmentDurations(result, segs) : null
         if (enforced) {
           for (const d of enforced.dropped) {
-            addLog(scan, 'warn', `chunk ${chunkIndex}: duration check — ${d.slice(0, 200)}`)
+            addLog(scan, 'warn', `chunk ${idx}: duration check — ${d.slice(0, 200)}`)
           }
         }
         // STRICT per-segment acceptance: every segment window must individually be >= threshold.
@@ -355,7 +496,7 @@ class Scheduler {
         if (enforced) {
           for (const v of enforced.valid) {
             if (v.confidence < CONFIDENCE_THRESHOLD) {
-              addLog(scan, 'info', `chunk ${chunkIndex}: S${v.segmentIndex} conf ${v.confidence} < ${CONFIDENCE_THRESHOLD} — rejected (strict threshold)`)
+              addLog(scan, 'info', `chunk ${idx}: S${v.segmentIndex} conf ${v.confidence} < ${CONFIDENCE_THRESHOLD} — rejected (strict threshold)`)
             }
           }
         }
@@ -364,7 +505,7 @@ class Scheduler {
           : result.match && result.confidence >= CONFIDENCE_THRESHOLD
 
         if (accepted) {
-          const base = chunkIndex * CHUNK_SECONDS
+          const base = idx * CHUNK_SECONDS
           let chunkSeg: [number, number]
           let shortSeg: [number, number]
           let matchedIds: string | undefined
@@ -377,7 +518,8 @@ class Scheduler {
             matchedIds = v.map((x) => `S${x.segmentIndex}`).join(', ')
             confidence = Math.max(...v.map((x) => x.confidence))
             // FRAME-BY-FRAME MAP: persist each validated segment window as an exact
-            // short↔movie mapping. Keep only the best mapping per segment.
+            // short↔movie mapping. Keep only the best mapping per segment — and queue
+            // every new/changed mapping for LIVE 24fps verification immediately.
             if (!scan.segmentMatches) scan.segmentMatches = []
             for (const x of v) {
               const sm: SegmentMatch = {
@@ -389,18 +531,30 @@ class Scheduler {
                 confidence: x.confidence,
                 speed: x.speed || '1.0x',
                 model: m.id,
-                chunkIndex,
+                chunkIndex: idx,
+                verification: { state: 'pending', attempts: 0 },
               }
               const existing = scan.segmentMatches.find((e) => e.segmentIndex === x.segmentIndex)
               if (!existing) {
                 scan.segmentMatches.push(sm)
-              } else if (sm.confidence > existing.confidence) {
+                this.enqueueVerify(job, sm.segmentIndex)
+              } else if (existing.verification?.state === 'confirmed') {
+                // ORDER SAFETY: a frame-verified mapping is LOCKED — never replaced by a
+                // later unverified claim, even at higher scan confidence.
+                addLog(scan, 'info', `  S${x.segmentIndex}: new candidate ignored — segment already CONFIRMED at 24fps`)
+                continue
+              } else if (sm.confidence > existing.confidence || existing.verification?.state === 'rejected_final') {
+                const windowChanged = Math.abs(existing.movieStart - sm.movieStart) > 0.25 || Math.abs(existing.movieEnd - sm.movieEnd) > 0.25
                 Object.assign(existing, sm)
+                if (windowChanged || existing.verification?.state === 'rejected_final') {
+                  existing.verification = { state: 'pending', attempts: 0 }
+                }
+                if (existing.verification?.state === 'pending') this.enqueueVerify(job, sm.segmentIndex)
               }
               addLog(
                 scan,
                 'success',
-                `  S${x.segmentIndex} mapped: short ${x.shortStart.toFixed(3)}s-${x.shortEnd.toFixed(3)}s ↔ movie ${(base + x.chunkStart).toFixed(3)}s-${(base + x.chunkEnd).toFixed(3)}s (${(x.chunkEnd - x.chunkStart).toFixed(3)}s @ ${x.speed || '1.0x'}, conf ${x.confidence})`,
+                `  S${x.segmentIndex} mapped: short ${x.shortStart.toFixed(3)}s-${x.shortEnd.toFixed(3)}s ↔ movie ${(base + x.chunkStart).toFixed(3)}s-${(base + x.chunkEnd).toFixed(3)}s (${(x.chunkEnd - x.chunkStart).toFixed(3)}s @ ${x.speed || '1.0x'}, conf ${x.confidence}) → queued for 24fps verification`,
               )
             }
             scan.segmentMatches.sort((a, b) => a.segmentIndex - b.segmentIndex)
@@ -412,7 +566,7 @@ class Scheduler {
           }
           const cand: Candidate = {
             id: crypto.randomBytes(6).toString('hex'),
-            chunkIndex,
+            chunkIndex: idx,
             confidence,
             shortSegment: shortSeg,
             chunkSegment: chunkSeg,
@@ -427,72 +581,245 @@ class Scheduler {
           addLog(
             scan,
             'success',
-            `match found ${fmt(cand.absSegment[0])}-${fmt(cand.absSegment[1])} conf ${confidence}${matchedIds ? ` [segments: ${matchedIds}]` : ''} (chunk ${chunkIndex}, ${m.id})`,
+            `match found ${fmt(cand.absSegment[0])}-${fmt(cand.absSegment[1])} conf ${confidence}${matchedIds ? ` [segments: ${matchedIds}]` : ''} (chunk ${idx}, ${m.id})`,
           )
           // Early stop when accepted matches cover the whole short video.
-          if (this.shortFullyCovered(scan)) {
+          if (this.shortFullyCovered(scan) && !job.earlyStop) {
             job.earlyStop = true
-            addLog(scan, 'success', 'Accepted matches now cover the FULL short video — cancelling pending chunks')
+            addLog(scan, 'success', 'Accepted matches now cover the FULL short video — cancelling pending chunks (verification continues)')
           }
         } else {
           chunk.status = 'no_match'
           chunk.confidence = enforced ? enforced.confidence : result.confidence
           if (enforced && result.match && !enforced.match) {
-            addLog(scan, 'warn', `chunk ${chunkIndex}: model claimed a match but NO segment passed the exact-duration check — rejected as false positive`)
+            addLog(scan, 'warn', `chunk ${idx}: model claimed a match but NO segment passed the exact-duration check — rejected as false positive`)
           } else if (result.match) {
-            addLog(scan, 'info', `chunk ${chunkIndex}: low confidence (<${CONFIDENCE_THRESHOLD}) — treated as no match`)
+            addLog(scan, 'info', `chunk ${idx}: low confidence (<${CONFIDENCE_THRESHOLD}) — treated as no match`)
           }
         }
         for (const rl of result.rejected_lookalikes || []) {
-          addLog(scan, 'info', `chunk ${chunkIndex}: rejected lookalike ${rl.segment} @ ${rl.chunk_range} — ${rl.reason.slice(0, 120)}`)
+          addLog(scan, 'info', `chunk ${idx}: rejected lookalike ${rl.segment} @ ${rl.chunk_range} — ${rl.reason.slice(0, 120)}`)
         }
       } catch (err) {
         const e = err instanceof GeminiError ? err : new GeminiError('other', err instanceof Error ? err.message : String(err))
         if (e.kind === 'rpd' || e.kind === 'unavailable') {
-          setModelExhausted(m.id, job.apiKey, m.rpd)
+          setModelExhausted(m.id, lane.apiKey, m.rpd)
           st.state = 'exhausted'
           chunk.status = 'pending'
           chunk.model = undefined
           // Not the chunk's fault — refund the attempt so it still gets 3 real tries.
           chunk.attempts = Math.max(0, chunk.attempts - 1)
-          job.queue.push(chunkIndex)
+          job.queue.push(idx)
           addLog(
             scan,
             'warn',
             e.kind === 'unavailable'
-              ? `${m.id} unavailable (404/retired) — removed from pool, requeued chunk ${chunkIndex}`
-              : `429 (daily quota) on ${m.id} — exhausted, requeued chunk ${chunkIndex}`,
+              ? `${m.id} (key ${lane.idx}) unavailable (404/retired) — removed from pool, requeued chunk ${idx}`
+              : `429 (daily quota) on ${m.id} (key ${lane.idx}) — exhausted, requeued chunk ${idx}`,
           )
-          job.inFlight.delete(chunkIndex)
-          if (uploadedName) void deleteFileQuiet(job.ai, uploadedName)
+          job.inFlight.delete(idx)
+          if (uploadedName) void deleteFileQuiet(lane.ai, uploadedName)
           this.mark(job)
           return
         } else if (e.kind === 'rate') {
-          job.cooldownUntil[m.id] = Date.now() + RATE_COOLDOWN_MS
+          job.cooldownUntil[rk] = Date.now() + RATE_COOLDOWN_MS
           st.state = 'cooling'
-          st.cooldownUntil = job.cooldownUntil[m.id]
+          st.cooldownUntil = job.cooldownUntil[rk]
           chunk.status = 'pending'
           chunk.model = undefined
-          job.queue.push(chunkIndex)
-          addLog(scan, 'warn', `429 (rate) on ${m.id} — cooling 60s, requeued chunk ${chunkIndex}`)
+          job.queue.push(idx)
+          addLog(scan, 'warn', `429 (rate) on ${m.id} (key ${lane.idx}) — cooling 60s, requeued chunk ${idx}`)
         } else {
           // 500 / timeout / parse failure: retry up to 2 more times on another model.
           if (chunk.attempts <= 2) {
             chunk.status = 'pending'
             chunk.model = undefined
-            job.queue.push(chunkIndex)
-            addLog(scan, 'warn', `error on chunk ${chunkIndex} via ${m.id}: ${e.message.slice(0, 140)} — retry ${chunk.attempts}/3`)
+            job.queue.push(idx)
+            addLog(scan, 'warn', `error on chunk ${idx} via ${m.id}: ${e.message.slice(0, 140)} — retry ${chunk.attempts}/3`)
           } else {
             chunk.status = 'failed'
-            addLog(scan, 'error', `chunk ${chunkIndex} failed after 3 attempts: ${e.message.slice(0, 140)}`)
+            addLog(scan, 'error', `chunk ${idx} failed after 3 attempts: ${e.message.slice(0, 140)}`)
           }
         }
       } finally {
-        job.inFlight.delete(chunkIndex)
-        if (uploadedName) void deleteFileQuiet(job.ai, uploadedName)
+        job.inFlight.delete(idx)
+        if (uploadedName) void deleteFileQuiet(lane.ai, uploadedName)
         st.currentChunk = null
         this.mark(job)
       }
+    }
+  }
+
+  /** Execute one live verification task (verify @24fps or rescan @13fps).
+   *  Returns false when this worker must exit (RPD exhausted / model retired). */
+  private async runVerifyTask(job: Job, lane: KeyLane, m: ModelSpec, task: VerifyTask): Promise<boolean> {
+    const { scan } = job
+    const st = this.modelState(job, lane, m)
+    const sm = (scan.segmentMatches || []).find((s) => s.segmentIndex === task.segmentIndex)
+
+    // Idempotency guard: the segment's persisted state must still expect this task.
+    if (!sm || !sm.verification) return true
+    if (task.kind === 'verify' && sm.verification.state !== 'pending') return true
+    if (task.kind === 'rescan' && sm.verification.state !== 'rescanning') return true
+
+    const mediaDir = scanMediaDir(scan.id)
+    const rk = this.rateKey(lane, m)
+    job.verifyInFlight.add(task.segmentIndex)
+    st.state = 'active'
+    st.currentChunk = null
+    job.lastRequestAt[rk] = Date.now()
+    const used = incrementModelUsage(m.id, lane.apiKey)
+    st.usedToday = used
+    this.mark(job)
+
+    const tmpFiles: string[] = []
+    const remoteNames: string[] = []
+    try {
+      if (task.kind === 'verify') {
+        sm.verification.state = 'verifying'
+        addLog(scan, 'info', `verify S${sm.segmentIndex} @24fps → ${m.id} (key ${lane.idx}, attempt ${sm.verification.attempts + 1})`)
+        this.mark(job)
+
+        const tag = `${sm.segmentIndex}-${Date.now()}`
+        const shortClip = path.join(mediaDir, `vlive-short-${tag}.mp4`)
+        const movieClip = path.join(mediaDir, `vlive-movie-${tag}.mp4`)
+        tmpFiles.push(shortClip, movieClip)
+        await extractSegment(path.join(mediaDir, 'short.mp4'), sm.shortStart, sm.shortEnd, shortClip)
+        await extractSegment(path.join(mediaDir, 'movie.mp4'), sm.movieStart, sm.movieEnd, movieClip)
+
+        const su = await uploadVideo(lane.ai, shortClip)
+        remoteNames.push(su.name)
+        const mu = await uploadVideo(lane.ai, movieClip)
+        remoteNames.push(mu.name)
+        const res = await liveVerifyRequest(lane.ai, m.id, su.uri, mu.uri)
+
+        sm.verification.attempts += 1
+        sm.verification.model = m.id
+        sm.verification.keyLane = lane.idx
+        sm.verification.confidence = res.confidence
+
+        if (res.verdict === 'CONFIRM' && res.confidence >= CONFIDENCE_THRESHOLD) {
+          sm.verification.state = 'confirmed'
+          sm.verification.note = res.note
+          sm.verification.reason = undefined
+          addLog(scan, 'success', `S${sm.segmentIndex} CONFIRMED @24fps conf ${res.confidence} (${m.id}, key ${lane.idx}) — ${res.note.slice(0, 100)}`)
+        } else {
+          const reason = res.reason || res.note || 'verifier gave no reason'
+          if (sm.verification.attempts >= 2) {
+            sm.verification.state = 'rejected_final'
+            sm.verification.reason = reason
+            addLog(scan, 'error', `S${sm.segmentIndex} REJECTED by Verifier (final, attempt ${sm.verification.attempts}): ${reason.slice(0, 180)}`)
+          } else {
+            sm.verification.state = 'rescanning'
+            sm.verification.reason = reason
+            sm.verification.rejectedWindow = [sm.movieStart, sm.movieEnd]
+            this.enqueueVerify(job, sm.segmentIndex, 'rescan')
+            addLog(scan, 'warn', `S${sm.segmentIndex} REJECTED @24fps — queuing 13fps re-scan of chunk ${sm.chunkIndex} with rejection context: ${reason.slice(0, 140)}`)
+          }
+        }
+      } else {
+        // ----- 13fps rescan: full chunk minute + the rejected short clip + history -----
+        const seg = (scan.shortSegments || []).find((s) => s.index === sm.segmentIndex)
+        if (!seg) {
+          sm.verification.state = 'rejected_final'
+          sm.verification.reason = `${sm.verification.reason || ''} (re-scan impossible: segment data missing)`.trim()
+          return true
+        }
+        addLog(scan, 'info', `re-scan S${sm.segmentIndex} @13fps in chunk ${sm.chunkIndex} → ${m.id} (key ${lane.idx})`)
+        this.mark(job)
+
+        const base = sm.chunkIndex * CHUNK_SECONDS
+        const chunkEnd = Math.min(base + CHUNK_SECONDS, scan.movieDuration || base + CHUNK_SECONDS)
+        const tag = `${sm.segmentIndex}-${Date.now()}`
+        const shortClip = path.join(mediaDir, `vrescan-short-${tag}.mp4`)
+        const chunkClip = path.join(mediaDir, `vrescan-chunk-${tag}.mp4`)
+        tmpFiles.push(shortClip, chunkClip)
+        await extractSegment(path.join(mediaDir, 'short.mp4'), seg.start, seg.end, shortClip)
+        await extractSegment(path.join(mediaDir, 'movie.mp4'), base, chunkEnd, chunkClip)
+
+        const su = await uploadVideo(lane.ai, shortClip)
+        remoteNames.push(su.name)
+        const cu = await uploadVideo(lane.ai, chunkClip)
+        remoteNames.push(cu.name)
+
+        const firstWindow = sm.verification.rejectedWindow || [sm.movieStart, sm.movieEnd]
+        const history: RescanHistory = {
+          segmentIndex: sm.segmentIndex,
+          segmentDuration: seg.end - seg.start,
+          segmentText: singleSegmentPromptText(seg),
+          firstWindow: [firstWindow[0] - base, firstWindow[1] - base],
+          firstConfidence: sm.confidence,
+          rejectionReason: sm.verification.reason || '',
+          movieGuess: scan.movieGuess,
+        }
+        const result = await rescanSegmentRequest(lane.ai, m.id, su.uri, cu.uri, history)
+        const enforced = enforceSegmentDurations(result, [seg])
+        for (const d of enforced.dropped) addLog(scan, 'warn', `re-scan S${sm.segmentIndex}: ${d.slice(0, 160)}`)
+        const best = enforced.valid.filter((v) => v.confidence >= CONFIDENCE_THRESHOLD).sort((a, b) => b.confidence - a.confidence)[0]
+
+        if (best) {
+          const newStart = base + best.chunkStart
+          const newEnd = base + best.chunkEnd
+          const sameAsRejected = Math.abs(newStart - firstWindow[0]) <= 0.25 && Math.abs(newEnd - firstWindow[1]) <= 0.25
+          sm.movieStart = newStart
+          sm.movieEnd = newEnd
+          sm.confidence = best.confidence
+          sm.speed = best.speed || sm.speed
+          sm.model = m.id
+          sm.verification.state = 'pending'
+          this.enqueueVerify(job, sm.segmentIndex, 'verify')
+          addLog(
+            scan,
+            'success',
+            `re-scan S${sm.segmentIndex}: ${sameAsRejected ? 'model DEFENDS the original window' : 'NEW window found'} ${fmt(newStart)}-${fmt(newEnd)} conf ${best.confidence} — sending back to 24fps verification`,
+          )
+        } else {
+          sm.verification.state = 'rejected_final'
+          sm.verification.reason = `${sm.verification.reason || 'verifier rejection'} | 13fps re-scan of chunk ${sm.chunkIndex} found no same-to-same window (${result.note?.slice(0, 120) || 'no note'})`
+          addLog(scan, 'error', `S${sm.segmentIndex} REJECTED (final): re-scan found no valid window in chunk ${sm.chunkIndex}`)
+        }
+      }
+      return true
+    } catch (err) {
+      const e = err instanceof GeminiError ? err : new GeminiError('other', err instanceof Error ? err.message : String(err))
+      // Roll the segment back to a queueable state — verification must NEVER block the scan.
+      sm.verification.state = task.kind === 'rescan' ? 'rescanning' : 'pending'
+      if (e.kind === 'rpd' || e.kind === 'unavailable') {
+        setModelExhausted(m.id, lane.apiKey, m.rpd)
+        st.state = 'exhausted'
+        this.enqueueVerify(job, task.segmentIndex, task.kind)
+        addLog(scan, 'warn', `${m.id} (key ${lane.idx}) ${e.kind === 'rpd' ? 'quota exhausted' : 'unavailable'} during verification — S${task.segmentIndex} requeued`)
+        job.verifyInFlight.delete(task.segmentIndex)
+        this.mark(job)
+        return false
+      } else if (e.kind === 'rate') {
+        job.cooldownUntil[rk] = Date.now() + RATE_COOLDOWN_MS
+        st.state = 'cooling'
+        st.cooldownUntil = job.cooldownUntil[rk]
+        this.enqueueVerify(job, task.segmentIndex, task.kind)
+        addLog(scan, 'warn', `429 (rate) on ${m.id} (key ${lane.idx}) during verification — cooling 60s, S${task.segmentIndex} requeued`)
+      } else {
+        const errs = (job.verifyErrors[task.segmentIndex] = (job.verifyErrors[task.segmentIndex] || 0) + 1)
+        if (errs <= 3) {
+          this.enqueueVerify(job, task.segmentIndex, task.kind)
+          addLog(scan, 'warn', `verification error for S${task.segmentIndex} via ${m.id}: ${e.message.slice(0, 120)} — retry ${errs}/3 (with backoff)`)
+          await sleep(Math.min(15_000, 2_000 * 2 ** (errs - 1)))
+        } else {
+          addLog(scan, 'error', `S${task.segmentIndex} verification failed ${errs - 1} times: ${e.message.slice(0, 120)} — left as "pending" (scan result kept)`)
+        }
+      }
+      return true
+    } finally {
+      job.verifyInFlight.delete(task.segmentIndex)
+      for (const name of remoteNames) void deleteFileQuiet(lane.ai, name)
+      for (const f of tmpFiles) {
+        try {
+          fs.unlinkSync(f)
+        } catch {
+          /* ignore */
+        }
+      }
+      this.mark(job)
     }
   }
 
@@ -500,7 +827,7 @@ class Scheduler {
    *  Uses the frame-by-frame segment map when available (strict), candidates otherwise. */
   private shortFullyCovered(scan: Scan): boolean {
     if (!scan.shortDuration) return false
-    const sms = scan.segmentMatches || []
+    const sms = (scan.segmentMatches || []).filter((s) => s.verification?.state !== 'rejected_final')
     const intervals: [number, number][] = (
       sms.length > 0 ? sms.map((s) => [s.shortStart, s.shortEnd] as [number, number]) : scan.candidates.map((c) => c.shortSegment)
     ).sort((a, b) => a[0] - b[0])
@@ -521,12 +848,12 @@ class Scheduler {
   }
 
   /** Build verification regions. STRICT: when a frame-by-frame segment map exists, regions
-   *  are built ONLY from validated segment matches — consecutive segments are merged ONLY
-   *  when their movie windows are contiguous in the same way as their short windows, so a
-   *  region's movie duration always equals its short duration. Never merge across distant
-   *  movie positions. */
+   *  are built ONLY from validated segment matches that were NOT rejected by the verifier —
+   *  consecutive segments are merged ONLY when their movie windows are contiguous in the
+   *  same way as their short windows, so a region's movie duration always equals its short
+   *  duration. Never merge across distant movie positions. */
   private buildRegions(scan: Scan): MatchRegion[] {
-    const sms = scan.segmentMatches || []
+    const sms = (scan.segmentMatches || []).filter((s) => s.verification?.state !== 'rejected_final')
     if (sms.length > 0) {
       const sorted = [...sms].sort((a, b) => a.segmentIndex - b.segmentIndex)
       const regions: MatchRegion[] = []
@@ -594,26 +921,61 @@ class Scheduler {
     return regions
   }
 
-  /** Merge matches into regions, then verify each at 14fps. */
+  /** Merge matches into regions. When the LIVE 24fps per-segment verification ran, region
+   *  verdicts are derived directly from it (no duplicate model calls). The legacy 14fps
+   *  region pass only runs for candidate-only scans with no segment map. */
   private async verificationPass(job: Job) {
     const { scan } = job
-    if (scan.candidates.length === 0 && (scan.segmentMatches || []).length === 0) {
+    const sms = scan.segmentMatches || []
+    if (scan.candidates.length === 0 && sms.length === 0) {
       scan.regions = []
       return
     }
     scan.status = 'verifying'
-    addLog(scan, 'info', 'Starting final verification pass (14 fps)...')
     this.mark(job)
 
     const regions = this.buildRegions(scan)
     scan.regions = regions
-    if ((scan.segmentMatches || []).length > 0) {
-      addLog(scan, 'info', `Regions built from the frame-by-frame segment map: ${regions.length} region(s), each with equal short/movie duration`)
+
+    if (sms.length > 0) {
+      // Live-verified path: derive each region's verdict from its segments' 24fps results.
+      addLog(scan, 'info', `Regions built from the live-verified segment map: ${regions.length} region(s)`)
+      const rejectedCount = sms.filter((s) => s.verification?.state === 'rejected_final').length
+      if (rejectedCount > 0) addLog(scan, 'warn', `${rejectedCount} segment(s) rejected by the 24fps verifier are EXCLUDED from final regions`)
+      for (const region of regions) {
+        const segs = (region.segmentIndexes || []).map((i) => sms.find((s) => s.segmentIndex === i)).filter(Boolean) as SegmentMatch[]
+        const confirmed = segs.filter((s) => s.verification?.state === 'confirmed')
+        if (segs.length > 0 && confirmed.length === segs.length) {
+          region.verified = {
+            match: true,
+            confidence: Math.max(...confirmed.map((s) => s.verification?.confidence || 0)),
+            model: confirmed[0].verification?.model || 'live-verifier',
+            note: `All ${segs.length} segment(s) frame-verified at 24fps`,
+          }
+        } else {
+          region.verified = {
+            match: true,
+            confidence: region.maxConfidence,
+            model: 'unverified',
+            note: `${confirmed.length}/${segs.length} segment(s) verified — rest pending (verifier quota/errors); scan confidence kept`,
+          }
+        }
+      }
+      for (const g of this.groupOverlapping(regions)) {
+        const best = g.reduce((a, b) => ((b.verified?.confidence || 0) > (a.verified?.confidence || 0) ? b : a))
+        best.selected = true
+      }
+      this.mark(job)
+      return
     }
+
+    // ----- Legacy path (no segment map): 14fps region verification -----
+    addLog(scan, 'info', 'Starting final verification pass (14 fps)...')
     addLog(scan, 'info', `${regions.length} merged match region(s) to verify`)
     this.mark(job)
 
     const mediaDir = scanMediaDir(scan.id)
+    const lane = job.lanes[job.lanes.length - 1] // prefer the verifier key when present
     for (const region of regions) {
       try {
         const shortSeg = path.join(mediaDir, `verify-short-${region.id}.mp4`)
@@ -621,25 +983,26 @@ class Scheduler {
         await extractSegment(path.join(mediaDir, 'short.mp4'), region.shortStart, region.shortEnd, shortSeg)
         await extractSegment(path.join(mediaDir, 'movie.mp4'), region.movieStart, region.movieEnd, movieSeg)
 
-        const model = await this.pickVerifyModel(job)
+        const model = this.pickFreeModel(job, lane)
         if (!model) {
-          addLog(scan, 'warn', `No model available to verify region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} �� keeping scan confidence`)
+          addLog(scan, 'warn', `No model available to verify region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} — keeping scan confidence`)
           region.verified = { match: true, confidence: region.maxConfidence, model: 'unverified', note: 'All models exhausted; using scan confidence' }
           continue
         }
-        const wait = (job.lastRequestAt[model.id] || 0) + MODEL_MIN_INTERVAL_MS - Date.now()
+        const rk = this.rateKey(lane, model)
+        const wait = (job.lastRequestAt[rk] || 0) + MODEL_MIN_INTERVAL_MS - Date.now()
         if (wait > 0) await sleep(wait)
-        job.lastRequestAt[model.id] = Date.now()
-        const used = incrementModelUsage(model.id, job.apiKey)
-        this.modelState(job, model).usedToday = used
-        addLog(scan, 'info', `verifying region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} → ${model.id} @14fps`)
+        job.lastRequestAt[rk] = Date.now()
+        const used = incrementModelUsage(model.id, lane.apiKey)
+        this.modelState(job, lane, model).usedToday = used
+        addLog(scan, 'info', `verifying region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} → ${model.id} @14fps (key ${lane.idx})`)
         this.mark(job)
 
-        const su = await uploadVideo(job.ai, shortSeg)
-        const mu = await uploadVideo(job.ai, movieSeg)
-        const result = await verifyRequest(job.ai, model.id, su.uri, mu.uri)
-        void deleteFileQuiet(job.ai, su.name)
-        void deleteFileQuiet(job.ai, mu.name)
+        const su = await uploadVideo(lane.ai, shortSeg)
+        const mu = await uploadVideo(lane.ai, movieSeg)
+        const result = await verifyRequest(lane.ai, model.id, su.uri, mu.uri)
+        void deleteFileQuiet(lane.ai, su.name)
+        void deleteFileQuiet(lane.ai, mu.name)
 
         region.verified = {
           match: result.match && result.confidence >= CONFIDENCE_THRESHOLD,
@@ -657,13 +1020,7 @@ class Scheduler {
     }
 
     // When multiple regions overlap the same short-video scene, select the highest verified confidence.
-    const groups: MatchRegion[][] = []
-    for (const r of regions) {
-      const g = groups.find((grp) => grp.some((x) => r.shortStart < x.shortEnd && x.shortStart < r.shortEnd))
-      if (g) g.push(r)
-      else groups.push([r])
-    }
-    for (const g of groups) {
+    for (const g of this.groupOverlapping(regions)) {
       const matching = g.filter((r) => r.verified?.match)
       const pool = matching.length > 0 ? matching : g
       const best = pool.reduce((a, b) => ((b.verified?.confidence || 0) > (a.verified?.confidence || 0) ? b : a))
@@ -672,16 +1029,26 @@ class Scheduler {
     this.mark(job)
   }
 
-  private async pickVerifyModel(job: Job, exclude?: Set<string>): Promise<ModelSpec | null> {
+  private groupOverlapping(regions: MatchRegion[]): MatchRegion[][] {
+    const groups: MatchRegion[][] = []
+    for (const r of regions) {
+      const g = groups.find((grp) => grp.some((x) => r.shortStart < x.shortEnd && x.shortStart < r.shortEnd))
+      if (g) g.push(r)
+      else groups.push([r])
+    }
+    return groups
+  }
+
+  private pickFreeModel(job: Job, lane: KeyLane, exclude?: Set<string>): ModelSpec | null {
     for (const m of MODEL_POOL) {
       if (exclude?.has(m.id)) continue
-      if (getModelUsage(m.id, job.apiKey) >= m.rpd) continue
-      const cool = job.cooldownUntil[m.id] || 0
+      if (getModelUsage(m.id, lane.apiKey) >= m.rpd) continue
+      const cool = job.cooldownUntil[this.rateKey(lane, m)] || 0
       if (cool > Date.now()) continue
       return m
     }
     // Everything excluded but still available? Fall back to any usable model.
-    if (exclude && exclude.size > 0) return this.pickVerifyModel(job)
+    if (exclude && exclude.size > 0) return this.pickFreeModel(job, lane)
     return null
   }
 }
