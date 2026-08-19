@@ -17,6 +17,8 @@ export interface SegmentForensics {
   end_frame: string
   background_details: string
   audio: string
+  /** what makes this segment different from neighboring similar-looking segments (dialog scenes etc.) */
+  distinguishing_marks?: string
 }
 
 /** One scene segment detected in the short video during the segmentation pass. */

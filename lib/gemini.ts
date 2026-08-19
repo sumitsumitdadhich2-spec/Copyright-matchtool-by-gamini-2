@@ -267,7 +267,8 @@ For EACH segment, describe ALL of the following:
 4. START FRAME: precise description of the very first frame (who is where, pose, what is visible).
 5. END FRAME: precise description of the very last frame before the cut.
 6. BACKGROUND DETAILS: fixed objects and their positions, lighting direction, weather, colors, any on-screen text, and anything unique (a rock, a footprint, smoke shape) that can be used as a fingerprint.
-7. AUDIO: dialogue words (if any), music, sound effects during this segment.
+7. AUDIO: dialogue words (if any) QUOTED VERBATIM, music, sound effects during this segment. Spoken dialogue is one of the strongest fingerprints — never summarize it, always quote the exact words.
+8. DISTINGUISHING MARKS: what makes THIS segment different from every other similar-looking segment in the video. This is MANDATORY and most important for conversation scenes where the same two people talk across many consecutive shots — for those, the description "woman talking to woman" is USELESS. Instead capture: the exact dialogue line spoken, hand/head positions at start and end, which shoulder the camera looks over, blinks, gestures, background passersby, objects held, and body posture changes.
 
 Output strict JSON only, nothing else:
 {
@@ -285,7 +286,8 @@ Output strict JSON only, nothing else:
       "start_frame": "...",
       "end_frame": "...",
       "background_details": "...",
-      "audio": "..."
+      "audio": "...",
+      "distinguishing_marks": "..."
     }
   ]
 }
@@ -294,7 +296,8 @@ Rules:
 - Every cut in the video = a new segment. Do not merge two shots into one segment.
 - Segments must be contiguous: each segment's start = previous segment's end.
 - Do NOT skip any part of the video. The last segment must end at the video's total duration.
-- Write descriptions so specific that a different take of the same scene (same actors, same location, different moment) would FAIL to match them.`
+- Write descriptions so specific that a different take of the same scene (same actors, same location, different moment) would FAIL to match them.
+- NO TWO SEGMENTS may have interchangeable descriptions. If two of your descriptions could be swapped without anyone noticing, they are BOTH too vague — rewrite them with the exact dialogue words, gestures, and frame details that tell them apart.`
 
 const SCAN_PROMPT_BASE = `This is a copyright match tool. You are given TWO videos.
 Video 1 is a SHORT VIDEO (the clip we are trying to locate).
@@ -498,6 +501,7 @@ export async function segmentShortRequest(
       end_frame?: string
       background_details?: string
       audio?: string
+      distinguishing_marks?: string
     }
     const parsed = tolerantJsonParse<{ movie_guess?: string; segments?: RawForensicSegment[] }>(raw)
     const segments: ShortSegment[] = []
