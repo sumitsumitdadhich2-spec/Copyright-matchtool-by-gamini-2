@@ -719,6 +719,9 @@ class Scheduler {
             sm.verification.state = 'rescanning'
             sm.verification.reason = reason
             sm.verification.rejectedWindow = [sm.movieStart, sm.movieEnd]
+            // Release the in-flight lock BEFORE enqueueing — enqueueVerify silently
+            // drops segments still marked in-flight, which would lose the 13fps re-scan.
+            job.verifyInFlight.delete(sm.segmentIndex)
             this.enqueueVerify(job, sm.segmentIndex, 'rescan')
             addLog(scan, 'warn', `S${sm.segmentIndex} REJECTED @24fps — queuing 13fps re-scan of chunk ${sm.chunkIndex} with rejection context: ${reason.slice(0, 140)}`)
           }
@@ -773,6 +776,9 @@ class Scheduler {
           sm.speed = best.speed || sm.speed
           sm.model = m.id
           sm.verification.state = 'pending'
+          // Release the in-flight lock BEFORE enqueueing — otherwise the follow-up
+          // 24fps verification of the re-scanned window is silently dropped.
+          job.verifyInFlight.delete(sm.segmentIndex)
           this.enqueueVerify(job, sm.segmentIndex, 'verify')
           addLog(
             scan,
