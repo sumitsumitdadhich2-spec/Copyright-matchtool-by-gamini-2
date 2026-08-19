@@ -213,9 +213,13 @@ class Scheduler {
     const { scan } = job
     addLog(scan, 'info', `Segmentation pass: analyzing short video at 20 fps (movie ID + scene changes)...`)
     this.mark(job)
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const model = await this.pickVerifyModel(job)
+    const tried = new Set<string>()
+    for (let attempt = 0; attempt < 4; attempt++) {
+      // Rotate models between attempts — a model that returned broken JSON once
+      // will usually return the same broken JSON again at temperature 0.
+      const model = await this.pickVerifyModel(job, tried)
       if (!model) break
+      tried.add(model.id)
       try {
         const wait = (job.lastRequestAt[model.id] || 0) + MODEL_MIN_INTERVAL_MS - Date.now()
         if (wait > 0) await sleep(wait)
@@ -235,9 +239,9 @@ class Scheduler {
         return
       } catch (err) {
         const e = err instanceof GeminiError ? err : new GeminiError('other', err instanceof Error ? err.message : String(err))
-        if (e.kind === 'rpd') setModelExhausted(model.id, job.apiKey, model.rpd)
+        if (e.kind === 'rpd' || e.kind === 'unavailable') setModelExhausted(model.id, job.apiKey, model.rpd)
         else if (e.kind === 'rate') job.cooldownUntil[model.id] = Date.now() + RATE_COOLDOWN_MS
-        addLog(scan, 'warn', `Segmentation attempt ${attempt + 1}/3 failed on ${model.id}: ${e.message.slice(0, 120)}`)
+        addLog(scan, 'warn', `Segmentation attempt ${attempt + 1}/4 failed on ${model.id}: ${e.message.slice(0, 120)}`)
         this.mark(job)
       }
     }
@@ -405,13 +409,21 @@ class Scheduler {
         }
       } catch (err) {
         const e = err instanceof GeminiError ? err : new GeminiError('other', err instanceof Error ? err.message : String(err))
-        if (e.kind === 'rpd') {
+        if (e.kind === 'rpd' || e.kind === 'unavailable') {
           setModelExhausted(m.id, job.apiKey, m.rpd)
           st.state = 'exhausted'
           chunk.status = 'pending'
           chunk.model = undefined
+          // Not the chunk's fault — refund the attempt so it still gets 3 real tries.
+          chunk.attempts = Math.max(0, chunk.attempts - 1)
           job.queue.push(chunkIndex)
-          addLog(scan, 'warn', `429 (daily quota) on ${m.id} — exhausted, requeued chunk ${chunkIndex}`)
+          addLog(
+            scan,
+            'warn',
+            e.kind === 'unavailable'
+              ? `${m.id} unavailable (404/retired) — removed from pool, requeued chunk ${chunkIndex}`
+              : `429 (daily quota) on ${m.id} — exhausted, requeued chunk ${chunkIndex}`,
+          )
           job.inFlight.delete(chunkIndex)
           if (uploadedName) void deleteFileQuiet(job.ai, uploadedName)
           this.mark(job)
@@ -565,13 +577,16 @@ class Scheduler {
     this.mark(job)
   }
 
-  private async pickVerifyModel(job: Job): Promise<ModelSpec | null> {
+  private async pickVerifyModel(job: Job, exclude?: Set<string>): Promise<ModelSpec | null> {
     for (const m of MODEL_POOL) {
+      if (exclude?.has(m.id)) continue
       if (getModelUsage(m.id, job.apiKey) >= m.rpd) continue
       const cool = job.cooldownUntil[m.id] || 0
       if (cool > Date.now()) continue
       return m
     }
+    // Everything excluded but still available? Fall back to any usable model.
+    if (exclude && exclude.size > 0) return this.pickVerifyModel(job)
     return null
   }
 }

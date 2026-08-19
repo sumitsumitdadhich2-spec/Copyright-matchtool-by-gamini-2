@@ -37,7 +37,7 @@ export interface SegmentationResult {
   segments: ShortSegment[]
 }
 
-export type GeminiErrorKind = 'rpd' | 'rate' | 'other'
+export type GeminiErrorKind = 'rpd' | 'rate' | 'unavailable' | 'other'
 
 export class GeminiError extends Error {
   kind: GeminiErrorKind
@@ -76,6 +76,13 @@ export async function deleteFileQuiet(ai: GoogleGenAI, name: string) {
 function classifyError(err: unknown): GeminiError {
   const msg = err instanceof Error ? err.message : String(err)
   const lower = msg.toLowerCase()
+  // Model retired / not accessible for this API key — permanently remove from pool for the day.
+  if (
+    lower.includes('no longer available') ||
+    (lower.includes('404') && (lower.includes('not found') || lower.includes('models/')))
+  ) {
+    return new GeminiError('unavailable', msg)
+  }
   const is429 =
     lower.includes('429') || lower.includes('resource_exhausted') || lower.includes('quota') || lower.includes('rate limit')
   if (is429) {
@@ -94,8 +101,8 @@ function classifyError(err: unknown): GeminiError {
   return new GeminiError('other', msg)
 }
 
-/** Strict JSON parsing with fallback repair when the model wraps JSON in markdown. */
-export function parseModelJSON(text: string): ChunkScanResult {
+/** Extract the JSON block from a model response (strips markdown fences / surrounding prose). */
+function extractJsonBlock(text: string): string {
   let raw = text.trim()
   const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fence) raw = fence[1].trim()
@@ -104,7 +111,109 @@ export function parseModelJSON(text: string): ChunkScanResult {
     const end = raw.lastIndexOf('}')
     if (start >= 0 && end > start) raw = raw.slice(start, end + 1)
   }
-  const parsed = JSON.parse(raw) as Partial<ChunkScanResult>
+  return raw
+}
+
+/** Remove trailing commas before } or ] — string-aware so content inside strings is untouched. */
+function stripTrailingCommas(raw: string): string {
+  let inStr = false
+  let esc = false
+  let out = ''
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i]
+    if (inStr) {
+      out += c
+      if (esc) esc = false
+      else if (c === '\\') esc = true
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') {
+      inStr = true
+      out += c
+      continue
+    }
+    if (c === ',') {
+      let j = i + 1
+      while (j < raw.length && /\s/.test(raw[j])) j++
+      if (raw[j] === '}' || raw[j] === ']') continue
+    }
+    out += c
+  }
+  return out
+}
+
+/** Salvage JSON that was cut off mid-output: keep everything up to the last complete value and close open brackets. */
+function salvageTruncatedJson(raw: string): string | null {
+  let inStr = false
+  let esc = false
+  let lastComplete = -1
+  const stack: string[] = []
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (c === '\\') esc = true
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') inStr = true
+    else if (c === '{' || c === '[') stack.push(c)
+    else if (c === '}' || c === ']') {
+      stack.pop()
+      if (stack.length > 0) lastComplete = i
+    }
+  }
+  if (lastComplete < 0) return null
+  const prefix = raw.slice(0, lastComplete + 1).replace(/,\s*$/, '')
+  // Recompute which brackets are still open in the prefix, then close them.
+  inStr = false
+  esc = false
+  const open: string[] = []
+  for (let i = 0; i < prefix.length; i++) {
+    const c = prefix[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (c === '\\') esc = true
+      else if (c === '"') inStr = false
+      continue
+    }
+    if (c === '"') inStr = true
+    else if (c === '{' || c === '[') open.push(c)
+    else if (c === '}' || c === ']') open.pop()
+  }
+  let out = prefix
+  for (let i = open.length - 1; i >= 0; i--) out += open[i] === '{' ? '}' : ']'
+  try {
+    JSON.parse(out)
+    return out
+  } catch {
+    return null
+  }
+}
+
+/** Tolerant JSON.parse: tries strict parse, then trailing-comma repair, then truncation salvage. */
+export function tolerantJsonParse<T>(raw: string): T {
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    // fall through to repairs
+  }
+  const cleaned = stripTrailingCommas(raw)
+  try {
+    return JSON.parse(cleaned) as T
+  } catch {
+    // fall through to truncation salvage
+  }
+  const salvaged = salvageTruncatedJson(cleaned)
+  if (salvaged !== null) return JSON.parse(salvaged) as T
+  throw new Error('Unrepairable JSON from model')
+}
+
+/** Strict JSON parsing with fallback repair when the model wraps JSON in markdown. */
+export function parseModelJSON(text: string): ChunkScanResult {
+  const raw = extractJsonBlock(text)
+  const parsed = tolerantJsonParse<Partial<ChunkScanResult>>(raw)
   const segmentMatches: RawSegmentMatch[] = Array.isArray(parsed.segment_matches)
     ? parsed.segment_matches
         .filter((m) => m && typeof m === 'object')
@@ -357,14 +466,7 @@ export async function segmentShortRequest(
     })
     const text = resp.text
     if (!text) throw new Error('Empty model response')
-    let raw = text.trim()
-    const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (fence) raw = fence[1].trim()
-    if (!raw.startsWith('{')) {
-      const start = raw.indexOf('{')
-      const end = raw.lastIndexOf('}')
-      if (start >= 0 && end > start) raw = raw.slice(start, end + 1)
-    }
+    const raw = extractJsonBlock(text)
     interface RawForensicSegment {
       id?: string
       start?: string
@@ -378,7 +480,7 @@ export async function segmentShortRequest(
       background_details?: string
       audio?: string
     }
-    const parsed = JSON.parse(raw) as { movie_guess?: string; segments?: RawForensicSegment[] }
+    const parsed = tolerantJsonParse<{ movie_guess?: string; segments?: RawForensicSegment[] }>(raw)
     const segments: ShortSegment[] = []
     for (const s of parsed.segments || []) {
       const start = toSecondsMs(String(s.start || ''))
