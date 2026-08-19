@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Pause, Play, RotateCcw, SplitSquareHorizontal } from 'lucide-react'
-import type { Scan } from '@/lib/types'
+import type { Scan, SegmentVerification } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
 
 /** One comparable pair: a short-video time range mapped to a movie time range of equal duration. */
@@ -16,6 +16,8 @@ interface ComparePair {
   confidence: number
   speed?: string
   verified?: { match: boolean; confidence: number; note?: string }
+  /** live 2-key verification state for this segment */
+  verification?: SegmentVerification
 }
 
 /** Side-by-side preview of matched timelapses. When the frame-by-frame segment map exists,
@@ -38,6 +40,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
             movieEnd: s.movieEnd,
             confidence: s.confidence,
             speed: s.speed,
+            verification: s.verification,
             verified: region?.verified
               ? { match: region.verified.match, confidence: region.verified.confidence, note: region.verified.note }
               : undefined,
@@ -135,14 +138,36 @@ export function ComparePanel({ scan }: { scan: Scan }) {
           {pair.label} · {idx + 1} / {pairs.length}
         </span>
         <span className="rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">{duration.toFixed(3)}s{pair.speed && pair.speed !== '1.0x' ? ` @ ${pair.speed}` : ''}</span>
-        {pair.verified && (
+        {pair.verification ? (
           <span
             className={`rounded-full px-2 py-0.5 font-mono text-xs ${
-              pair.verified.match ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'
+              pair.verification.state === 'confirmed'
+                ? 'bg-success/15 text-success'
+                : pair.verification.state === 'rejected_final'
+                  ? 'bg-destructive/15 text-destructive'
+                  : 'bg-secondary text-muted-foreground'
             }`}
           >
-            {pair.verified.match ? 'verified match' : 'rejected'} · {pair.verified.confidence}
+            {pair.verification.state === 'confirmed'
+              ? `CONFIRMED @24fps · ${pair.verification.confidence ?? ''}`
+              : pair.verification.state === 'rejected_final'
+                ? 'REJECTED by Verifier (API 2)'
+                : pair.verification.state === 'rescanning'
+                  ? 're-scanning @13fps'
+                  : pair.verification.state === 'verifying'
+                    ? 'verifying @24fps'
+                    : 'pending verification'}
           </span>
+        ) : (
+          pair.verified && (
+            <span
+              className={`rounded-full px-2 py-0.5 font-mono text-xs ${
+                pair.verified.match ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'
+              }`}
+            >
+              {pair.verified.match ? 'verified match' : 'rejected'} · {pair.verified.confidence}
+            </span>
+          )
         )}
         <div className="ml-auto flex items-center gap-2">
           <button
@@ -219,6 +244,14 @@ export function ComparePanel({ scan }: { scan: Scan }) {
         </button>
         <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">scan conf {pair.confidence}</span>
       </div>
+      {pair.verification?.state === 'rejected_final' && pair.verification.reason && (
+        <p className="mt-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs leading-relaxed text-destructive">
+          Rejected by Verifier (API 2): {pair.verification.reason}
+        </p>
+      )}
+      {pair.verification?.state === 'confirmed' && pair.verification.note && (
+        <p className="mt-2 text-xs italic text-success">{pair.verification.note}</p>
+      )}
       {pair.verified?.note && <p className="mt-2 text-xs italic text-muted-foreground">{pair.verified.note}</p>}
     </section>
   )

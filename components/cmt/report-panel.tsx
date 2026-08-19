@@ -1,8 +1,25 @@
 'use client'
 
+import { Fragment } from 'react'
 import { FileCheck2, ShieldCheck } from 'lucide-react'
-import type { Scan } from '@/lib/types'
+import type { Scan, SegmentVerification } from '@/lib/types'
 import { fmtTime, fmtDuration } from '@/lib/format'
+
+function verifyBadge(v?: SegmentVerification) {
+  if (!v) return { label: 'not verified', cls: 'bg-secondary text-muted-foreground' }
+  switch (v.state) {
+    case 'confirmed':
+      return { label: `CONFIRMED ${v.confidence ?? ''}`.trim(), cls: 'bg-success/15 text-success' }
+    case 'rejected_final':
+      return { label: 'REJECTED (API 2)', cls: 'bg-destructive/15 text-destructive' }
+    case 'verifying':
+      return { label: 'verifying @24fps', cls: 'bg-warning/15 text-warning' }
+    case 'rescanning':
+      return { label: 're-scanning @13fps', cls: 'bg-warning/15 text-warning' }
+    default:
+      return { label: 'pending verification', cls: 'bg-secondary text-muted-foreground' }
+  }
+}
 
 export function ReportPanel({ scan }: { scan: Scan }) {
   const report = scan.report
@@ -40,25 +57,43 @@ export function ReportPanel({ scan }: { scan: Scan }) {
                   <th className="py-1 pr-2 font-medium">Duration</th>
                   <th className="py-1 pr-2 font-medium">Speed</th>
                   <th className="py-1 pr-2 font-medium">Conf</th>
-                  <th className="py-1 font-medium">Model</th>
+                  <th className="py-1 pr-2 font-medium">Model</th>
+                  <th className="py-1 font-medium">Verification</th>
                 </tr>
               </thead>
               <tbody className="font-mono">
-                {(report.segmentMatches || []).map((s) => (
-                  <tr key={s.segmentIndex} className="border-b border-border/50">
-                    <td className="py-1 pr-2 font-semibold">S{s.segmentIndex}</td>
-                    <td className="py-1 pr-2">
-                      {fmtTime(s.shortStart)} – {fmtTime(s.shortEnd)}
-                    </td>
-                    <td className="py-1 pr-2 text-success">
-                      {fmtTime(s.movieStart)} – {fmtTime(s.movieEnd)}
-                    </td>
-                    <td className="py-1 pr-2">{(s.movieEnd - s.movieStart).toFixed(3)}s</td>
-                    <td className="py-1 pr-2">{s.speed}</td>
-                    <td className="py-1 pr-2">{s.confidence}</td>
-                    <td className="py-1 text-muted-foreground">{s.model.replace('gemini-', '')}</td>
-                  </tr>
-                ))}
+                {(report.segmentMatches || []).map((s) => {
+                  const rejected = s.verification?.state === 'rejected_final'
+                  const badge = verifyBadge(s.verification)
+                  return (
+                    <Fragment key={s.segmentIndex}>
+                      <tr className={`border-b ${rejected ? 'border-destructive/30 bg-destructive/5' : 'border-border/50'}`}>
+                        <td className={`py-1 pr-2 font-semibold ${rejected ? 'text-destructive' : ''}`}>S{s.segmentIndex}</td>
+                        <td className="py-1 pr-2">
+                          {fmtTime(s.shortStart)} – {fmtTime(s.shortEnd)}
+                        </td>
+                        <td className={`py-1 pr-2 ${rejected ? 'text-destructive line-through' : 'text-success'}`}>
+                          {fmtTime(s.movieStart)} – {fmtTime(s.movieEnd)}
+                        </td>
+                        <td className="py-1 pr-2">{(s.movieEnd - s.movieStart).toFixed(3)}s</td>
+                        <td className="py-1 pr-2">{s.speed}</td>
+                        <td className="py-1 pr-2">{s.confidence}</td>
+                        <td className="py-1 pr-2 text-muted-foreground">{s.model.replace('gemini-', '')}</td>
+                        <td className="py-1">
+                          <span className={`rounded-full px-2 py-0.5 text-[11px] ${badge.cls}`}>{badge.label}</span>
+                        </td>
+                      </tr>
+                      {rejected && s.verification?.reason && (
+                        <tr className="border-b border-destructive/30 bg-destructive/5">
+                          <td />
+                          <td colSpan={7} className="py-1 pr-2 font-sans text-[11px] leading-relaxed text-destructive">
+                            Rejected by Verifier (API 2): {s.verification.reason}
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  )
+                })}
               </tbody>
             </table>
           </div>
