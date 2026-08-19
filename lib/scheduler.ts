@@ -2,7 +2,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import crypto from 'node:crypto'
 import type { GoogleGenAI } from '@google/genai'
-import type { Scan, Candidate, MatchRegion, SegmentMatch } from './types'
+import type { Scan, Candidate, MatchRegion, SegmentMatch, ShortSegment } from './types'
 import {
   MODEL_POOL,
   MODEL_MIN_INTERVAL_MS,
@@ -72,7 +72,6 @@ interface Job {
   /** transient error counter per segment so a flaky segment can't loop forever */
   verifyErrors: Record<number, number>
   stopping: boolean
-  earlyStop: boolean
   segmentsText: string | null
   /** rate-limit state keyed by `${laneIdx}|${modelId}` */
   lastRequestAt: Record<string, number>
@@ -148,7 +147,6 @@ class Scheduler {
       verifyInFlight: new Set(),
       verifyErrors: {},
       stopping: false,
-      earlyStop: false,
       segmentsText: null,
       lastRequestAt: {},
       cooldownUntil: {},
@@ -265,17 +263,11 @@ class Scheduler {
       }
     }
 
-    if (job.stopping && !job.earlyStop) {
+    if (job.stopping) {
       scan.status = 'stopped'
       addLog(scan, 'warn', 'Scan stopped. Pending chunks/verifications saved — use Resume to continue.')
       this.finish(job)
       return
-    }
-
-    if (job.earlyStop) {
-      for (const c of scan.chunks) if (c.status === 'pending') c.status = 'cancelled'
-      addLog(scan, 'success', 'Full match found, scan stopped early.')
-      scan.earlyStopped = true
     }
 
     // Build merged regions from the (now live-verified) segment map.
@@ -364,7 +356,7 @@ class Scheduler {
 
   /** True when the scan phase is fully finished (no chunks queued or in flight). */
   private scanPhaseDone(job: Job) {
-    return (job.queue.length === 0 || job.earlyStop) && job.inFlight.size === 0
+    return job.queue.length === 0 && job.inFlight.size === 0
   }
 
   /** Unified worker: one per (key lane × model). Picks work by lane priority —
@@ -401,7 +393,7 @@ class Scheduler {
       st.cooldownUntil = null
 
       // ----- Work selection (per-lane priority, free key takes any pending work) -----
-      const canScan = !job.earlyStop && job.queue.length > 0
+      const canScan = job.queue.length > 0
       const canVerify = job.verifyQueue.length > 0
       let verifyTask: VerifyTask | null = null
       let chunkIndex: number | undefined
@@ -412,6 +404,31 @@ class Scheduler {
       } else {
         if (canScan) chunkIndex = job.queue.shift()
         else if (canVerify) verifyTask = job.verifyQueue.shift() || null
+      }
+
+      // ----- Per-chunk segment selection -----
+      // Segments locked at conf 100 (or already 24fps-confirmed) are NOT searched again
+      // in later chunks. Everything below 100 keeps being searched in EVERY chunk —
+      // the real match may live in a later minute. If a locked segment is later rejected
+      // by the verifier, chunks that skipped it are re-queued (see onSegmentRejectedFinal).
+      let activeSegs: ShortSegment[] | null = null
+      let lockedIdx: number[] = []
+      if (chunkIndex !== undefined) {
+        const segsAll = scan.shortSegments || []
+        if (segsAll.length > 0) {
+          const locked = this.lockedSegmentIndexes(scan)
+          activeSegs = segsAll.filter((s) => !locked.has(s.index))
+          lockedIdx = segsAll.filter((s) => locked.has(s.index)).map((s) => s.index)
+          if (activeSegs.length === 0) {
+            // Nothing left to search in this chunk — every segment is locked.
+            const c = scan.chunks[chunkIndex]
+            c.status = 'cancelled'
+            c.excludedSegments = lockedIdx
+            addLog(scan, 'info', `chunk ${chunkIndex} skipped — all segments locked (conf 100 / 24fps-confirmed); will re-queue if the verifier rejects one`)
+            this.mark(job)
+            continue
+          }
+        }
       }
 
       if (verifyTask === null && chunkIndex === undefined) {
@@ -480,11 +497,18 @@ class Scheduler {
         const chunkFile = chunkPath(path.join(scanMediaDir(scan.id), 'chunks'), idx)
         const uploaded = await uploadVideo(lane.ai, chunkFile)
         uploadedName = uploaded.name
-        const result = await scanChunkRequest(lane.ai, m.id, shortUri, uploaded.uri, job.segmentsText || undefined, job.scan.movieGuess)
+        // Only ask about segments still being searched — locked (conf 100 / confirmed)
+        // segments are excluded from this chunk's prompt and recorded for re-queue safety.
+        const segText = activeSegs ? segmentsToPromptText(activeSegs) : job.segmentsText || undefined
+        if (lockedIdx.length > 0) {
+          chunk.excludedSegments = lockedIdx
+          addLog(scan, 'info', `chunk ${idx}: searching ${activeSegs!.length} segment(s) — S${lockedIdx.join(', S')} locked (conf 100 / confirmed), excluded`)
+        }
+        const result = await scanChunkRequest(lane.ai, m.id, shortUri, uploaded.uri, segText, job.scan.movieGuess)
 
         // Server-side false-positive filter: when segments exist, the model's answer is
         // ONLY trusted if it reported per-segment windows of the segment's EXACT duration.
-        const segs = scan.shortSegments || []
+        const segs = activeSegs || []
         const enforced = segs.length > 0 ? enforceSegmentDurations(result, segs) : null
         if (enforced) {
           for (const d of enforced.dropped) {
@@ -535,6 +559,7 @@ class Scheduler {
                 verification: { state: 'pending', attempts: 0 },
               }
               const existing = scan.segmentMatches.find((e) => e.segmentIndex === x.segmentIndex)
+              const sameWindow = (aS: number, aE: number, bS: number, bE: number) => Math.abs(aS - bS) <= 0.25 && Math.abs(aE - bE) <= 0.25
               if (!existing) {
                 scan.segmentMatches.push(sm)
                 this.enqueueVerify(job, sm.segmentIndex)
@@ -543,10 +568,30 @@ class Scheduler {
                 // later unverified claim, even at higher scan confidence.
                 addLog(scan, 'info', `  S${x.segmentIndex}: new candidate ignored — segment already CONFIRMED at 24fps`)
                 continue
+              } else if (
+                (existing.rejectedWindows || []).some((w) => sameWindow(sm.movieStart, sm.movieEnd, w[0], w[1]))
+              ) {
+                // This exact window was already REJECTED by the 24fps verifier — never retry it.
+                addLog(scan, 'info', `  S${x.segmentIndex}: candidate ${fmt(sm.movieStart)}-${fmt(sm.movieEnd)} ignored — window already rejected by verifier`)
+                continue
               } else if (sm.confidence > existing.confidence || existing.verification?.state === 'rejected_final') {
-                const windowChanged = Math.abs(existing.movieStart - sm.movieStart) > 0.25 || Math.abs(existing.movieEnd - sm.movieEnd) > 0.25
+                const windowChanged = !sameWindow(existing.movieStart, existing.movieEnd, sm.movieStart, sm.movieEnd)
                 const wasRejected = existing.verification?.state === 'rejected_final'
                 const prevVerification = existing.verification
+                // Keep the displaced (unverified) window as an alternate — it may still be
+                // the real match if the new one gets rejected.
+                if (windowChanged && !wasRejected) {
+                  this.addAlternate(existing, {
+                    shortStart: existing.shortStart,
+                    shortEnd: existing.shortEnd,
+                    movieStart: existing.movieStart,
+                    movieEnd: existing.movieEnd,
+                    confidence: existing.confidence,
+                    speed: existing.speed,
+                    model: existing.model,
+                    chunkIndex: existing.chunkIndex,
+                  })
+                }
                 Object.assign(existing, sm)
                 // Object.assign copies sm's fresh verification too — restore the real
                 // state unless the mapping actually changed (or was rejected before).
@@ -556,6 +601,30 @@ class Scheduler {
                   existing.verification = prevVerification
                 }
                 if (existing.verification?.state === 'pending') this.enqueueVerify(job, sm.segmentIndex)
+              } else {
+                // SUSPECT-CONFIDENCE RULE: any accepted match below conf 100 stays suspect,
+                // so equal/lower-confidence windows found in LATER chunks are kept as
+                // alternates — promoted for 24fps verification if the current one fails.
+                const windowChanged = !sameWindow(existing.movieStart, existing.movieEnd, sm.movieStart, sm.movieEnd)
+                if (windowChanged) {
+                  const added = this.addAlternate(existing, {
+                    shortStart: sm.shortStart,
+                    shortEnd: sm.shortEnd,
+                    movieStart: sm.movieStart,
+                    movieEnd: sm.movieEnd,
+                    confidence: sm.confidence,
+                    speed: sm.speed,
+                    model: sm.model,
+                    chunkIndex: sm.chunkIndex,
+                  })
+                  if (added) {
+                    addLog(
+                      scan,
+                      'info',
+                      `  S${x.segmentIndex}: ALTERNATE window saved ${fmt(sm.movieStart)}-${fmt(sm.movieEnd)} conf ${sm.confidence} (chunk ${idx}) — will be verified if the current mapping is rejected`,
+                    )
+                  }
+                }
               }
               addLog(
                 scan,
@@ -589,11 +658,8 @@ class Scheduler {
             'success',
             `match found ${fmt(cand.absSegment[0])}-${fmt(cand.absSegment[1])} conf ${confidence}${matchedIds ? ` [segments: ${matchedIds}]` : ''} (chunk ${idx}, ${m.id})`,
           )
-          // Early stop when accepted matches cover the whole short video.
-          if (this.shortFullyCovered(scan) && !job.earlyStop) {
-            job.earlyStop = true
-            addLog(scan, 'success', 'Accepted matches now cover the FULL short video — cancelling pending chunks (verification continues)')
-          }
+          // NO EARLY STOP: every chunk is always scanned. A "full coverage" claim from
+          // unverified matches proved unreliable — the real match may be in a later chunk.
         } else {
           chunk.status = 'no_match'
           chunk.confidence = enforced ? enforced.confidence : result.confidence
@@ -839,28 +905,95 @@ class Scheduler {
     }
   }
 
-  /** True when accepted matches jointly cover the entire short video (2s tolerance).
-   *  Uses the frame-by-frame segment map when available (strict), candidates otherwise. */
-  private shortFullyCovered(scan: Scan): boolean {
-    if (!scan.shortDuration) return false
-    const sms = (scan.segmentMatches || []).filter((s) => s.verification?.state !== 'rejected_final')
-    const intervals: [number, number][] = (
-      sms.length > 0 ? sms.map((s) => [s.shortStart, s.shortEnd] as [number, number]) : scan.candidates.map((c) => c.shortSegment)
-    ).sort((a, b) => a[0] - b[0])
-    let covered = 0
-    let curStart = -1
-    let curEnd = -1
-    for (const [s, e] of intervals) {
-      if (s > curEnd + 0.5) {
-        if (curEnd > curStart) covered += curEnd - curStart
-        curStart = s
-        curEnd = e
-      } else {
-        curEnd = Math.max(curEnd, e)
-      }
+  /** Segments that no longer need to be searched in upcoming chunks:
+   *  24fps-CONFIRMED, or matched at confidence 100 (and not verifier-rejected).
+   *  Anything below 100 is treated as suspect and keeps being searched everywhere. */
+  private lockedSegmentIndexes(scan: Scan): Set<number> {
+    const out = new Set<number>()
+    for (const sm of scan.segmentMatches || []) {
+      const st = sm.verification?.state
+      if (st === 'rejected_final') continue
+      if (st === 'confirmed' || sm.confidence >= 100) out.add(sm.segmentIndex)
     }
-    if (curEnd > curStart) covered += curEnd - curStart
-    return covered >= scan.shortDuration - 2
+    return out
+  }
+
+  /** Store an alternate window on a segment (deduped by ~0.25s window). Returns true if added. */
+  private addAlternate(sm: SegmentMatch, alt: NonNullable<SegmentMatch['alternates']>[number]): boolean {
+    if (!sm.alternates) sm.alternates = []
+    const dup = sm.alternates.some(
+      (a) => Math.abs(a.movieStart - alt.movieStart) <= 0.25 && Math.abs(a.movieEnd - alt.movieEnd) <= 0.25,
+    )
+    if (dup) return false
+    const rejected = (sm.rejectedWindows || []).some(
+      (w) => Math.abs(w[0] - alt.movieStart) <= 0.25 && Math.abs(w[1] - alt.movieEnd) <= 0.25,
+    )
+    if (rejected) return false
+    sm.alternates.push(alt)
+    // Keep the list bounded: best 5 by confidence.
+    sm.alternates.sort((a, b) => b.confidence - a.confidence)
+    if (sm.alternates.length > 5) sm.alternates.length = 5
+    return true
+  }
+
+  /** Called whenever the verifier FINALLY rejects a segment's current window.
+   *  1) Records the rejected window so it is never retried.
+   *  2) Promotes the best saved alternate window (from another chunk) for verification.
+   *  3) If no alternate exists, re-queues every already-scanned chunk that had EXCLUDED
+   *     this segment from its prompt (it was locked at conf 100 back then). */
+  private onSegmentRejectedFinal(job: Job, sm: SegmentMatch) {
+    const { scan } = job
+    if (!sm.rejectedWindows) sm.rejectedWindows = []
+    if (!sm.rejectedWindows.some((w) => Math.abs(w[0] - sm.movieStart) <= 0.25 && Math.abs(w[1] - sm.movieEnd) <= 0.25)) {
+      sm.rejectedWindows.push([sm.movieStart, sm.movieEnd])
+    }
+
+    // 1) Promote the best alternate window not already rejected.
+    const alts = (sm.alternates || []).filter(
+      (a) => !sm.rejectedWindows!.some((w) => Math.abs(w[0] - a.movieStart) <= 0.25 && Math.abs(w[1] - a.movieEnd) <= 0.25),
+    )
+    if (alts.length > 0) {
+      const best = alts.sort((a, b) => b.confidence - a.confidence)[0]
+      sm.alternates = (sm.alternates || []).filter((a) => a !== best)
+      sm.shortStart = best.shortStart
+      sm.shortEnd = best.shortEnd
+      sm.movieStart = best.movieStart
+      sm.movieEnd = best.movieEnd
+      sm.confidence = best.confidence
+      sm.speed = best.speed
+      sm.model = best.model
+      sm.chunkIndex = best.chunkIndex
+      sm.verification = { state: 'pending', attempts: 0 }
+      job.verifyInFlight.delete(sm.segmentIndex)
+      this.enqueueVerify(job, sm.segmentIndex, 'verify')
+      addLog(
+        scan,
+        'warn',
+        `S${sm.segmentIndex}: current window rejected — promoting ALTERNATE ${fmt(best.movieStart)}-${fmt(best.movieEnd)} conf ${best.confidence} (chunk ${best.chunkIndex}) for 24fps verification`,
+      )
+      this.mark(job)
+      return
+    }
+
+    // 2) No alternates left — re-queue chunks that skipped this segment (it was locked then).
+    let requeued = 0
+    for (const c of scan.chunks) {
+      if (!(c.excludedSegments || []).includes(sm.segmentIndex)) continue
+      if (c.status !== 'match' && c.status !== 'no_match' && c.status !== 'cancelled') continue
+      c.status = 'pending'
+      c.excludedSegments = undefined
+      c.model = undefined
+      if (!job.queue.includes(c.index) && !job.inFlight.has(c.index)) job.queue.push(c.index)
+      requeued++
+    }
+    if (requeued > 0) {
+      addLog(
+        scan,
+        'warn',
+        `S${sm.segmentIndex} rejected with no alternates — re-queued ${requeued} chunk(s) that had skipped this segment while it was locked`,
+      )
+      this.mark(job)
+    }
   }
 
   /** Build verification regions. STRICT: when a frame-by-frame segment map exists, regions

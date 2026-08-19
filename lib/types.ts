@@ -6,6 +6,10 @@ export interface ChunkState {
   model?: string
   attempts: number
   confidence?: number
+  /** segment indexes that were EXCLUDED from this chunk's scan prompt because they were
+   *  locked (conf 100 or 24fps-confirmed) at scan time. If such a segment is later
+   *  rejected by the verifier, this chunk is re-queued to search for it. */
+  excludedSegments?: number[]
 }
 
 /** Forensic-level details captured for a segment during the segmentation pass. */
@@ -79,6 +83,24 @@ export interface SegmentMatch {
   chunkIndex: number
   /** live 24fps verification result (2-key flow); absent = never queued */
   verification?: SegmentVerification
+  /** alternative windows found in OTHER chunks while the current mapping was unverified —
+   *  promoted for verification if the current mapping is rejected by the 24fps verifier */
+  alternates?: SegmentAlternate[]
+  /** all movie windows the verifier has finally rejected for this segment — never re-tried */
+  rejectedWindows?: [number, number][]
+}
+
+/** An alternative candidate window for a segment, found in a different chunk while
+ *  another (unverified) mapping for the same segment was already held. */
+export interface SegmentAlternate {
+  shortStart: number
+  shortEnd: number
+  movieStart: number
+  movieEnd: number
+  confidence: number
+  speed: string
+  model: string
+  chunkIndex: number
 }
 
 export interface Candidate {
