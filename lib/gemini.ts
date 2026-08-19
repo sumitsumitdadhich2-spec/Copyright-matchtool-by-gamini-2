@@ -213,7 +213,13 @@ ${guessLine}
 SEGMENTS OF THE SHORT VIDEO:
 ${segmentsText}
 
-TASK: For EACH segment, determine whether the IDENTICAL footage appears anywhere inside this one-minute chunk, and if it does, report the EXACT time range inside the chunk. You have BOTH videos in front of you — do NOT match based on the text descriptions alone. The descriptions only tell you WHAT to look for; the final decision must come from directly comparing the actual frames of Video 1 against the actual frames of Video 2.
+TASK: For EACH segment listed above, determine whether the IDENTICAL footage appears anywhere inside this one-minute chunk, and if it does, report the EXACT time range inside the chunk. You have BOTH videos in front of you — do NOT match based on the text descriptions alone. The descriptions only tell you WHAT to look for; the final decision must come from directly comparing the actual frames of Video 1 against the actual frames of Video 2.
+
+DURATION LOCK (most important rule):
+- Every segment has an EXACT duration (duration_seconds in the list above). When you search this chunk, you are looking for a window of EXACTLY that many seconds — no more, no less.
+- Example: if a segment lasts 0.875 seconds, find the 0.875-second window in this chunk that contains it. Report chunk_start and chunk_end so that (chunk_end - chunk_start) equals the segment's duration within ±0.10s.
+- The scene change map above is authoritative: each segment begins and ends exactly at a cut. The matched chunk window must start on the same frame the segment starts on and end on the same frame the segment ends on.
+- If the only candidate window has a different duration, first check for a speed change (slowed/sped up) and report it in "speed" with the scaled duration justified. If durations differ and there is no speed change, it is NOT a match — reject it as a false positive.
 
 METHOD (follow strictly, segment by segment):
 1. Watch the segment in Video 1. Memorize its start frame, end frame, and action timeline.
@@ -227,10 +233,11 @@ METHOD (follow strictly, segment by segment):
 4. A match is valid ONLY if ALL five tests pass. This must be the exact same take — the same recording, frame for frame.
 5. DURATION CHECK: the matched chunk range must have almost the same duration as the segment. If durations differ, check whether the short clip was slowed down or sped up, and report it in "speed". If durations differ and there is no speed change, it is NOT a valid match.
 
-CRITICAL WARNINGS:
+CRITICAL WARNINGS (false positives must be ELIMINATED):
 - Movies contain many similar-looking scenes: same actors, same location, same costumes, similar framing. These are NOT matches. A different moment or a different take of the same scene must be REJECTED even if it looks 90% similar.
 - Matching only on the description (e.g. "boy runs to bottle" appears in both) is FORBIDDEN. The frames themselves must be identical.
-- A false positive is much worse than a miss. When in doubt, leave it out.
+- Any candidate window whose duration does not equal the segment's exact duration (after accounting for a verified speed change) is a FALSE POSITIVE — put it in "rejected_lookalikes", never in "segment_matches".
+- A false positive is much worse than a miss. When in doubt, leave it out and record it in "rejected_lookalikes" with the reason.
 
 CONFIDENCE SCALE (per segment):
 - 95-100: all five tests passed, start and end frames verified identical.
@@ -413,8 +420,17 @@ export function segmentsToPromptText(segments: ShortSegment[]): string {
     return `${String(m).padStart(2, '0')}:${s.toFixed(3).padStart(6, '0')}`
   }
   const hasForensic = segments.some((s) => s.forensic)
+  // Scene-change map: exact cut boundaries + exact duration of every segment.
+  // This table is attached to EVERY one-minute movie chunk request.
+  const sceneMap = segments
+    .map(
+      (s) =>
+        `S${s.index}: scene change at ${fmt(s.start)} → next scene change at ${fmt(s.end)} — EXACT duration ${(s.end - s.start).toFixed(3)}s`,
+    )
+    .join('\n')
+  const mapBlock = `SCENE CHANGE MAP OF THE SHORT VIDEO (authoritative — a cut happens exactly at each boundary):\n${sceneMap}`
   if (hasForensic) {
-    return JSON.stringify(
+    const json = JSON.stringify(
       {
         segments: segments.map((s) => ({
           id: `S${s.index}`,
@@ -427,8 +443,9 @@ export function segmentsToPromptText(segments: ShortSegment[]): string {
       null,
       1,
     )
+    return `${mapBlock}\n\n${json}`
   }
-  return segments.map((s) => `S${s.index}: ${fmt(s.start)}-${fmt(s.end)} — ${s.description}`).join('\n')
+  return `${mapBlock}\n\n${segments.map((s) => `S${s.index}: ${fmt(s.start)}-${fmt(s.end)} — ${s.description}`).join('\n')}`
 }
 
 /** Main scan request: short video + one movie chunk at 7 fps, default media resolution. */

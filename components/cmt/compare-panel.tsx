@@ -112,9 +112,9 @@ export function ComparePanel({ scan }: { scan: Scan }) {
         </div>
       </div>
 
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+      <div className="mt-3 grid grid-cols-2 gap-2 sm:gap-3">
         <figure className="flex flex-col gap-1.5">
-          <figcaption className="flex items-center justify-between text-xs">
+          <figcaption className="flex flex-col gap-0.5 text-xs sm:flex-row sm:items-center sm:justify-between">
             <span className="font-medium">Short video</span>
             <span className="font-mono text-muted-foreground">
               {fmtTime(region.shortStart)} – {fmtTime(region.shortEnd)}
@@ -131,7 +131,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
           />
         </figure>
         <figure className="flex flex-col gap-1.5">
-          <figcaption className="flex items-center justify-between text-xs">
+          <figcaption className="flex flex-col gap-0.5 text-xs sm:flex-row sm:items-center sm:justify-between">
             <span className="font-medium">Movie</span>
             <span className="font-mono text-muted-foreground">
               {fmtTime(region.movieStart)} – {fmtTime(region.movieEnd)}
