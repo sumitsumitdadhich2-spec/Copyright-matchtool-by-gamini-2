@@ -30,6 +30,7 @@ import {
   segmentsToPromptText,
   verifyRequest,
   parseSegment,
+  enforceSegmentDurations,
   GeminiError,
 } from './gemini'
 
@@ -334,28 +335,56 @@ class Scheduler {
         uploadedName = uploaded.name
         const result = await scanChunkRequest(job.ai, m.id, job.shortUri!, uploaded.uri, job.segmentsText || undefined, job.scan.movieGuess)
 
-        if (result.match && result.confidence >= CONFIDENCE_THRESHOLD) {
-          const chunkSeg = parseSegment(result.chunk_segment) || [0, CHUNK_SECONDS]
-          const shortSeg = parseSegment(result.short_segment) || [0, scan.shortDuration || 60]
+        // Server-side false-positive filter: when segments exist, the model's answer is
+        // ONLY trusted if it reported per-segment windows of the segment's EXACT duration.
+        const segs = scan.shortSegments || []
+        const enforced = segs.length > 0 ? enforceSegmentDurations(result, segs) : null
+        if (enforced) {
+          for (const d of enforced.dropped) {
+            addLog(scan, 'warn', `chunk ${chunkIndex}: duration check — ${d.slice(0, 200)}`)
+          }
+        }
+        const accepted = enforced
+          ? enforced.match && enforced.confidence >= CONFIDENCE_THRESHOLD
+          : result.match && result.confidence >= CONFIDENCE_THRESHOLD
+
+        if (accepted) {
           const base = chunkIndex * CHUNK_SECONDS
+          let chunkSeg: [number, number]
+          let shortSeg: [number, number]
+          let matchedIds: string | undefined
+          let confidence: number
+          if (enforced) {
+            // Rebuild all ranges strictly from VALIDATED per-segment windows.
+            const v = enforced.valid
+            chunkSeg = [Math.min(...v.map((x) => x.chunkStart)), Math.max(...v.map((x) => x.chunkEnd))]
+            shortSeg = [Math.min(...v.map((x) => x.shortStart)), Math.max(...v.map((x) => x.shortEnd))]
+            matchedIds = v.map((x) => `S${x.segmentIndex}`).join(', ')
+            confidence = enforced.confidence
+          } else {
+            chunkSeg = parseSegment(result.chunk_segment) || [0, CHUNK_SECONDS]
+            shortSeg = parseSegment(result.short_segment) || [0, scan.shortDuration || 60]
+            matchedIds = result.matched_segments || undefined
+            confidence = result.confidence
+          }
           const cand: Candidate = {
             id: crypto.randomBytes(6).toString('hex'),
             chunkIndex,
-            confidence: result.confidence,
+            confidence,
             shortSegment: shortSeg,
             chunkSegment: chunkSeg,
             absSegment: [base + chunkSeg[0], base + chunkSeg[1]],
-            matchedSegments: result.matched_segments || undefined,
+            matchedSegments: matchedIds,
             model: m.id,
             note: result.note,
           }
           scan.candidates.push(cand)
           chunk.status = 'match'
-          chunk.confidence = result.confidence
+          chunk.confidence = confidence
           addLog(
             scan,
             'success',
-            `match found ${fmt(cand.absSegment[0])}-${fmt(cand.absSegment[1])} conf ${result.confidence}${result.matched_segments ? ` [segments: ${result.matched_segments}]` : ''} (chunk ${chunkIndex}, ${m.id})`,
+            `match found ${fmt(cand.absSegment[0])}-${fmt(cand.absSegment[1])} conf ${confidence}${matchedIds ? ` [segments: ${matchedIds}]` : ''} (chunk ${chunkIndex}, ${m.id})`,
           )
           // Early stop when accepted matches cover the whole short video.
           if (this.shortFullyCovered(scan)) {
@@ -364,9 +393,11 @@ class Scheduler {
           }
         } else {
           chunk.status = 'no_match'
-          chunk.confidence = result.confidence
-          if (result.match) {
-            addLog(scan, 'info', `chunk ${chunkIndex}: low confidence ${result.confidence} (<${CONFIDENCE_THRESHOLD}) — treated as no match`)
+          chunk.confidence = enforced ? enforced.confidence : result.confidence
+          if (enforced && result.match && !enforced.match) {
+            addLog(scan, 'warn', `chunk ${chunkIndex}: model claimed a match but NO segment passed the exact-duration check — rejected as false positive`)
+          } else if (result.match) {
+            addLog(scan, 'info', `chunk ${chunkIndex}: low confidence (<${CONFIDENCE_THRESHOLD}) — treated as no match`)
           }
         }
         for (const rl of result.rejected_lookalikes || []) {

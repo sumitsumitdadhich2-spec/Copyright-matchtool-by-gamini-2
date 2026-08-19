@@ -274,6 +274,7 @@ Output strict JSON only, nothing else:
 }
 
 Rules:
+- NEVER answer with the whole minute (e.g. chunk range 00:00-01:00). Every match MUST be an individual entry in "segment_matches" with its own exact-duration chunk_start/chunk_end. A match without a per-segment exact-duration window will be DISCARDED by the server.
 - "segment_matches" contains ONLY segments that passed all five tests with confidence >= 85.
 - "rejected_lookalikes" must list any similar-looking footage you found and WHY you rejected it — this proves you checked properly.
 - "match" is true if at least one segment passed.
@@ -483,6 +484,85 @@ export async function verifyRequest(
     ],
     true,
   )
+}
+
+/** A segment match that passed server-side duration validation. */
+export interface ValidatedSegmentMatch {
+  segmentIndex: number
+  /** seconds within the chunk */
+  chunkStart: number
+  chunkEnd: number
+  /** seconds within the short video */
+  shortStart: number
+  shortEnd: number
+  confidence: number
+  speed: string
+}
+
+export interface EnforcedResult {
+  match: boolean
+  confidence: number
+  valid: ValidatedSegmentMatch[]
+  /** human-readable reasons for every dropped/rewritten claim (for logs) */
+  dropped: string[]
+}
+
+/**
+ * Server-side FALSE POSITIVE filter. The model is never trusted:
+ * - Every claimed segment match must reference a real segment (S1, S2, ...).
+ * - chunk_start/chunk_end must parse and the window duration must equal the
+ *   segment's EXACT duration (adjusted for a reported speed change) within tolerance.
+ * - Whole-chunk answers ("the minute contains scenes") with no valid per-segment
+ *   exact-duration windows are REJECTED entirely.
+ */
+export function enforceSegmentDurations(result: ChunkScanResult, segments: ShortSegment[]): EnforcedResult {
+  const dropped: string[] = []
+  const valid: ValidatedSegmentMatch[] = []
+  const byId = new Map(segments.map((s) => [`S${s.index}`, s]))
+
+  for (const m of result.segment_matches || []) {
+    const seg = byId.get(m.segment.trim().toUpperCase())
+    if (!seg) {
+      dropped.push(`${m.segment}: unknown segment id`)
+      continue
+    }
+    const cs = toSecondsMs(m.chunk_start)
+    const ce = toSecondsMs(m.chunk_end)
+    if (cs === null || ce === null || ce <= cs) {
+      dropped.push(`S${seg.index}: unparseable chunk window "${m.chunk_start}-${m.chunk_end}"`)
+      continue
+    }
+    const segDur = seg.end - seg.start
+    // speed = playback speed of the short vs the movie. Short slowed to 0.5x → the
+    // original movie window is HALF the short segment's duration.
+    const speedNum = Number.parseFloat(m.speed) || 1
+    const speedFactor = speedNum > 0.1 && speedNum < 10 ? speedNum : 1
+    const expected = segDur * speedFactor
+    const tolerance = Math.max(0.35, expected * 0.15)
+    const actual = ce - cs
+    if (Math.abs(actual - expected) > tolerance) {
+      dropped.push(
+        `S${seg.index}: duration mismatch — segment is ${segDur.toFixed(3)}s (expected window ${expected.toFixed(3)}s @ ${speedFactor}x) but model reported ${actual.toFixed(3)}s window — rejected as false positive`,
+      )
+      continue
+    }
+    valid.push({
+      segmentIndex: seg.index,
+      chunkStart: cs,
+      chunkEnd: ce,
+      shortStart: seg.start,
+      shortEnd: seg.end,
+      confidence: m.confidence,
+      speed: m.speed,
+    })
+  }
+
+  if (result.match && (result.segment_matches?.length || 0) === 0) {
+    dropped.push('model claimed a match but gave NO per-segment exact-duration windows — rejected entirely')
+  }
+
+  const confidence = valid.length > 0 ? Math.max(...valid.map((v) => v.confidence)) : 0
+  return { match: valid.length > 0, confidence, valid, dropped }
 }
 
 /** Parse "mm:ss-mm:ss" (or h:mm:ss) into seconds tuple. Returns null when unparseable. */
