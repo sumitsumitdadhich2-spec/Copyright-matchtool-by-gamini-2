@@ -545,9 +545,15 @@ class Scheduler {
                 continue
               } else if (sm.confidence > existing.confidence || existing.verification?.state === 'rejected_final') {
                 const windowChanged = Math.abs(existing.movieStart - sm.movieStart) > 0.25 || Math.abs(existing.movieEnd - sm.movieEnd) > 0.25
+                const wasRejected = existing.verification?.state === 'rejected_final'
+                const prevVerification = existing.verification
                 Object.assign(existing, sm)
-                if (windowChanged || existing.verification?.state === 'rejected_final') {
+                // Object.assign copies sm's fresh verification too — restore the real
+                // state unless the mapping actually changed (or was rejected before).
+                if (windowChanged || wasRejected) {
                   existing.verification = { state: 'pending', attempts: 0 }
+                } else {
+                  existing.verification = prevVerification
                 }
                 if (existing.verification?.state === 'pending') this.enqueueVerify(job, sm.segmentIndex)
               }
@@ -784,12 +790,14 @@ class Scheduler {
       const e = err instanceof GeminiError ? err : new GeminiError('other', err instanceof Error ? err.message : String(err))
       // Roll the segment back to a queueable state — verification must NEVER block the scan.
       sm.verification.state = task.kind === 'rescan' ? 'rescanning' : 'pending'
+      // Release the in-flight lock BEFORE re-enqueueing — enqueueVerify silently
+      // drops segments that are still marked in-flight, which would lose the retry.
+      job.verifyInFlight.delete(task.segmentIndex)
       if (e.kind === 'rpd' || e.kind === 'unavailable') {
         setModelExhausted(m.id, lane.apiKey, m.rpd)
         st.state = 'exhausted'
         this.enqueueVerify(job, task.segmentIndex, task.kind)
         addLog(scan, 'warn', `${m.id} (key ${lane.idx}) ${e.kind === 'rpd' ? 'quota exhausted' : 'unavailable'} during verification — S${task.segmentIndex} requeued`)
-        job.verifyInFlight.delete(task.segmentIndex)
         this.mark(job)
         return false
       } else if (e.kind === 'rate') {
@@ -801,9 +809,11 @@ class Scheduler {
       } else {
         const errs = (job.verifyErrors[task.segmentIndex] = (job.verifyErrors[task.segmentIndex] || 0) + 1)
         if (errs <= 3) {
-          this.enqueueVerify(job, task.segmentIndex, task.kind)
           addLog(scan, 'warn', `verification error for S${task.segmentIndex} via ${m.id}: ${e.message.slice(0, 120)} — retry ${errs}/3 (with backoff)`)
+          // Backoff FIRST, then re-enqueue: the task must not sit in the queue (or be
+          // grabbed by another worker) while this segment is mid-backoff.
           await sleep(Math.min(15_000, 2_000 * 2 ** (errs - 1)))
+          this.enqueueVerify(job, task.segmentIndex, task.kind)
         } else {
           addLog(scan, 'error', `S${task.segmentIndex} verification failed ${errs - 1} times: ${e.message.slice(0, 120)} — left as "pending" (scan result kept)`)
         }

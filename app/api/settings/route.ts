@@ -27,6 +27,9 @@ export async function POST(req: Request) {
   }
   if (apiKey) {
     if (apiKey.length < 10) return NextResponse.json({ error: 'Invalid API key' }, { status: 400 })
+    if (!apiKey2 && apiKey === getApiKey2()) {
+      return NextResponse.json({ error: 'Key 1 must be DIFFERENT from Key 2 — same key gives no extra quota' }, { status: 400 })
+    }
     setApiKey(apiKey)
   }
   if (apiKey2) {
