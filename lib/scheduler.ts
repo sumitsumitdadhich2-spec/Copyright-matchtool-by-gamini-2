@@ -7,6 +7,7 @@ import {
   MODEL_MIN_INTERVAL_MS,
   RATE_COOLDOWN_MS,
   CONFIDENCE_THRESHOLD,
+  VERIFY_CONFIDENCE_THRESHOLD,
   CHUNK_SECONDS,
   SEGMENT_FPS,
   type ModelSpec,
@@ -623,8 +624,8 @@ class Scheduler {
 
         const model = await this.pickVerifyModel(job)
         if (!model) {
-          addLog(scan, 'warn', `No model available to verify region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} �� keeping scan confidence`)
-          region.verified = { match: true, confidence: region.maxConfidence, model: 'unverified', note: 'All models exhausted; using scan confidence' }
+          addLog(scan, 'warn', `No model available to verify region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} — NOT confirmed (unverified regions are never accepted)`)
+          region.verified = { match: false, confidence: region.maxConfidence, model: 'unverified', note: 'All models exhausted; region could not be verified at 100 — rejected' }
           continue
         }
         const wait = (job.lastRequestAt[model.id] || 0) + MODEL_MIN_INTERVAL_MS - Date.now()
@@ -641,17 +642,24 @@ class Scheduler {
         void deleteFileQuiet(job.ai, su.name)
         void deleteFileQuiet(job.ai, mu.name)
 
+        // BINARY verification: only a perfect 100 counts. Field testing proved every
+        // 90-99 verification was a false positive (generic lookalike similarity).
+        const pass = result.match && result.confidence >= VERIFY_CONFIDENCE_THRESHOLD
         region.verified = {
-          match: result.match && result.confidence >= CONFIDENCE_THRESHOLD,
+          match: pass,
           confidence: result.confidence,
           model: model.id,
           note: result.note,
         }
-        addLog(scan, result.match ? 'success' : 'warn', `region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} verified: ${result.match ? 'MATCH' : 'no match'} conf ${result.confidence}`)
+        if (result.match && !pass) {
+          addLog(scan, 'warn', `region ${fmt(region.movieStart)}-${fmt(region.movieEnd)}: model said match at conf ${result.confidence} < ${VERIFY_CONFIDENCE_THRESHOLD} — REJECTED (only 100 is accepted)`)
+        } else {
+          addLog(scan, pass ? 'success' : 'warn', `region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} verified: ${pass ? 'MATCH (100)' : 'no match'} conf ${result.confidence}`)
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        addLog(scan, 'error', `verification failed for region ${fmt(region.movieStart)}: ${msg.slice(0, 140)} — keeping scan confidence`)
-        region.verified = { match: true, confidence: region.maxConfidence, model: 'unverified', note: 'Verification errored; using scan confidence' }
+        addLog(scan, 'error', `verification failed for region ${fmt(region.movieStart)}: ${msg.slice(0, 140)} — NOT confirmed (unverified regions are never accepted)`)
+        region.verified = { match: false, confidence: region.maxConfidence, model: 'unverified', note: 'Verification errored; region could not be verified at 100 — rejected' }
       }
       this.mark(job)
     }
@@ -664,9 +672,12 @@ class Scheduler {
       else groups.push([r])
     }
     for (const g of groups) {
+      // ONLY verified (confidence 100) regions may be selected as final matches.
+      // If nothing in the group passed verification, nothing is selected — a
+      // rejected lookalike must never appear in the final report as a match.
       const matching = g.filter((r) => r.verified?.match)
-      const pool = matching.length > 0 ? matching : g
-      const best = pool.reduce((a, b) => ((b.verified?.confidence || 0) > (a.verified?.confidence || 0) ? b : a))
+      if (matching.length === 0) continue
+      const best = matching.reduce((a, b) => ((b.verified?.confidence || 0) > (a.verified?.confidence || 0) ? b : a))
       best.selected = true
     }
     this.mark(job)

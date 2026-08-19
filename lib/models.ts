@@ -25,6 +25,11 @@ export const RATE_COOLDOWN_MS = 60_000
 /** Accept a segment/chunk match only at or above this confidence (strict: >= 90). */
 export const CONFIDENCE_THRESHOLD = 90
 
+/** Final verification pass is BINARY: only a perfect 100 is accepted as a real match.
+ * Field testing showed every 95-confidence verification was a false positive
+ * (generic "same actor / same location" similarity), while 100s were always correct. */
+export const VERIFY_CONFIDENCE_THRESHOLD = 100
+
 /** fps used for the one-time short-video segmentation pass (locked).
  * 15 fps × 60s = 900 frames × 258 tok/frame ≈ 232K tokens — fits under the 250K TPM cap at default resolution. */
 export const SEGMENT_FPS = 15

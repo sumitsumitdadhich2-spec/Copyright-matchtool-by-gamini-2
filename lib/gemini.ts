@@ -404,23 +404,37 @@ Rules:
 - If nothing matches: {"match": false, "confidence": 0, "matched_segments": "", "segment_matches": [], "rejected_lookalikes": [], "short_segment": "", "chunk_segment": "", "note": "..."}`
 }
 
-const VERIFY_PROMPT = `This is a STRICT copyright match verification pass. You are given TWO video clips that were cut to (almost) the SAME duration.
-Video 1 is a segment cut from a SHORT VIDEO. Video 2 is a segment cut from a MOVIE at the exact position where a scan flagged a match.
+const VERIFY_PROMPT = `This is the FINAL, BINARY copyright match verification pass. You are given TWO video clips that were cut to (almost) the SAME duration.
+Video 1 is a segment cut from a SHORT VIDEO. Video 2 is a segment cut from a MOVIE at the exact position where an earlier scan flagged a match.
 
-If the flag was correct, these two clips are the SAME footage playing in parallel: frame 1 of Video 1 corresponds to frame 1 of Video 2, and every action happens at the same offset in both clips.
+YOUR VERDICT IS BINARY. There are only two allowed answers:
+- confidence 100 = you PROVED these are the exact same recording, frame for frame.
+- confidence 0 = anything else. There is NO middle ground. 95 does not exist. 90 does not exist. If you feel like answering 95, the truth is 0.
 
-METHOD (strict):
-1. Compare the FIRST frames of both clips — same shot, same pose, same background object positions.
-2. Compare the LAST frames of both clips the same way.
-3. Step through the clips in parallel — every action, cut, and camera move must happen at the SAME time offset in both.
-4. Aspect ratios may differ (the short may be cropped for vertical format) and colors may be graded/filtered — that is acceptable. Different takes, different moments, or different scenes are NOT.
+DEFAULT ASSUMPTION: the flag is WRONG. Earlier scans regularly flag "lookalikes" — same movie, same actors, same location, same costumes, but a DIFFERENT moment or a different take. Your entire job is to try to DISPROVE the match. Only if every disproof attempt fails may you answer 100.
 
-CONFIDENCE (strict): 90+ ONLY if this is verifiably the same recording frame for frame. Below 90 = reject. A false positive is worse than a miss.
+MANDATORY FINGERPRINT PROTOCOL — you must complete ALL of these, in order:
+1. FIRST-FRAME FINGERPRINT: pick one small, specific, non-generic detail visible in frame 1 of Video 1 (e.g. exact position of a background object, a word of on-screen text, a hand exactly on a door handle, a specific fold in clothing). Verify that EXACT detail appears in frame 1 of Video 2 in the same position. If you cannot name such a detail present in BOTH, answer 0.
+2. MIDPOINT FINGERPRINT: do the same at the middle of both clips — one specific detail, verified in BOTH.
+3. LAST-FRAME FINGERPRINT: do the same for the final frame of both clips.
+4. PARALLEL TIMELINE: step through both clips in parallel — every action, gesture, cut, and camera move must happen at the SAME time offset in both. One action out of sync = 0.
+5. AUDIO/DIALOGUE: if there is spoken dialogue, the exact same words must be spoken at the same offsets in both clips. Different or missing dialogue = 0.
 
-WARNING: The scan that flagged this match may itself have been WRONG (models sometimes echo timestamps without comparing frames). Do NOT assume the clips match just because they were flagged. Your job is to independently DISPROVE the match; only confirm it if the first-frame, last-frame, and parallel-timeline checks genuinely pass. In your "note", cite one concrete visual detail you verified in BOTH clips.
+AUTOMATIC ZEROES (answer 0 immediately, no exceptions):
+- Your best evidence is generic: "same man", "same woman", "same two people talking", "same location", "similar scene", "same actors at a table". Generic evidence is the signature of a FALSE POSITIVE, not a match.
+- Same scene but you cannot confirm it is the same TAKE (any doubt about pose, timing, gesture, or background detail).
+- The clips show the same characters doing similar things but any single action, camera move, or cut lands at a different offset.
+- You verified some checks but skipped or could not complete others. Incomplete protocol = 0.
+- Any hesitation, any "minor uncertainty", any urge to hedge with a 90-99 number = 0.
+
+ALLOWED DIFFERENCES (these alone must NOT lower a true 100): aspect-ratio crop (vertical reframing), color grading/filters, compression artifacts, small watermarks/logos. Everything else must be identical.
+
+"note" REQUIREMENT: if you answer 100, your note MUST name the three concrete fingerprints you verified (first frame, midpoint, last frame) in a compact form. A note that only says the scenes look the same is invalid — if you cannot write the fingerprints, your answer is 0.
+
+A false positive destroys this tool's credibility. A missed match is recoverable. When in ANY doubt: 0.
 
 Answer in strict JSON, nothing else:
-{"match": true or false, "confidence": 0-100, "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "note": "one short sentence"}`
+{"match": true or false, "confidence": 0 or 100, "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "note": "fingerprints verified (first/mid/last frame) or reason for rejection"}`
 
 async function generate(
   ai: GoogleGenAI,
