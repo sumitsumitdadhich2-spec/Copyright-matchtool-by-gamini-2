@@ -8,6 +8,7 @@ import {
   RATE_COOLDOWN_MS,
   CONFIDENCE_THRESHOLD,
   CHUNK_SECONDS,
+  SEGMENT_FPS,
   type ModelSpec,
 } from './models'
 import {
@@ -212,7 +213,7 @@ class Scheduler {
   /** Phase 1: send the whole short video at 20 fps → movie guess + millisecond scene segments. */
   private async segmentShort(job: Job) {
     const { scan } = job
-    addLog(scan, 'info', `Segmentation pass: analyzing short video at 20 fps (movie ID + scene changes)...`)
+    addLog(scan, 'info', `Segmentation pass: analyzing short video at ${SEGMENT_FPS} fps (movie ID + scene changes)...`)
     this.mark(job)
     const tried = new Set<string>()
     for (let attempt = 0; attempt < 4; attempt++) {

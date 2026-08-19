@@ -137,7 +137,7 @@ export interface Scan {
   chunks: ChunkState[]
   /** Gemini's guess of which movie the short video is from (segmentation pass). */
   movieGuess?: string | null
-  /** Scene segments of the short video detected at 20 fps, saved once and reused. */
+  /** Scene segments of the short video detected during the segmentation pass, saved once and reused. */
   shortSegments?: ShortSegment[]
   /** Frame-accurate per-segment matches accumulated during the scan (best per segment). */
   segmentMatches?: SegmentMatch[]
