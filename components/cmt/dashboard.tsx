@@ -124,7 +124,7 @@ export function Dashboard() {
           <ScanTimeline scan={scan || emptyScan()} />
           <ModelBoard scan={scan} usage={data?.usage || null} />
           {scan && scan.report && <ReportPanel scan={scan} />}
-          {scan && scan.regions.length > 0 && <ComparePanel scan={scan} />}
+          {scan && (scan.regions.length > 0 || (scan.segmentMatches?.length ?? 0) > 0) && <ComparePanel scan={scan} />}
           {scan && <CandidatesPanel scan={scan} />}
           {scan && <LogsPanel scan={scan} />}
         </div>

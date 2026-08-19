@@ -348,10 +348,10 @@ CRITICAL WARNINGS (false positives must be ELIMINATED):
 - Any candidate window whose duration does not equal the segment's exact duration (after accounting for a verified speed change) is a FALSE POSITIVE — put it in "rejected_lookalikes", never in "segment_matches".
 - A false positive is much worse than a miss. When in doubt, leave it out and record it in "rejected_lookalikes" with the reason.
 
-CONFIDENCE SCALE (per segment):
+CONFIDENCE SCALE (per segment — STRICT):
 - 95-100: all five tests passed, start and end frames verified identical.
-- 85-94: same take, minor uncertainty (e.g. compression artifacts).
-- Below 85: DO NOT report the segment at all.
+- 90-94: same take, minor uncertainty (e.g. compression artifacts).
+- Below 90: DO NOT report the segment at all. It goes in "rejected_lookalikes" instead. The server DISCARDS anything under 90.
 
 All timestamps in mm:ss.mmm (millisecond precision).
 
@@ -384,7 +384,8 @@ Output strict JSON only, nothing else:
 
 Rules:
 - NEVER answer with the whole minute (e.g. chunk range 00:00-01:00). Every match MUST be an individual entry in "segment_matches" with its own exact-duration chunk_start/chunk_end. A match without a per-segment exact-duration window will be DISCARDED by the server.
-- "segment_matches" contains ONLY segments that passed all five tests with confidence >= 85.
+- "segment_matches" contains ONLY segments that passed all five tests with confidence >= 90.
+- Each segment_matches entry MUST be an exact frame-mapped window: (chunk_end - chunk_start) MUST equal that segment's duration_seconds (adjusted only for a verified speed change). The server measures this and rejects any window that fails.
 - "rejected_lookalikes" must list any similar-looking footage you found and WHY you rejected it — this proves you checked properly.
 - "match" is true if at least one segment passed.
 - "confidence" (top-level) = highest segment confidence, or 0 if nothing matched.
@@ -392,10 +393,18 @@ Rules:
 - If nothing matches: {"match": false, "confidence": 0, "matched_segments": "", "segment_matches": [], "rejected_lookalikes": [], "short_segment": "", "chunk_segment": "", "note": "..."}`
 }
 
-const VERIFY_PROMPT = `This is a copyright match verification pass. You are given TWO short videos.
-Video 1 is a segment from a SHORT VIDEO. Video 2 is a segment from a MOVIE that was flagged as a possible match.
+const VERIFY_PROMPT = `This is a STRICT copyright match verification pass. You are given TWO video clips that were cut to (almost) the SAME duration.
+Video 1 is a segment cut from a SHORT VIDEO. Video 2 is a segment cut from a MOVIE at the exact position where a scan flagged a match.
 
-Carefully compare them frame by frame. Is Video 1's footage the same footage that appears in Video 2?
+If the flag was correct, these two clips are the SAME footage playing in parallel: frame 1 of Video 1 corresponds to frame 1 of Video 2, and every action happens at the same offset in both clips.
+
+METHOD (strict):
+1. Compare the FIRST frames of both clips — same shot, same pose, same background object positions.
+2. Compare the LAST frames of both clips the same way.
+3. Step through the clips in parallel — every action, cut, and camera move must happen at the SAME time offset in both.
+4. Aspect ratios may differ (the short may be cropped for vertical format) and colors may be graded/filtered — that is acceptable. Different takes, different moments, or different scenes are NOT.
+
+CONFIDENCE (strict): 90+ ONLY if this is verifiably the same recording frame for frame. Below 90 = reject. A false positive is worse than a miss.
 
 Answer in strict JSON, nothing else:
 {"match": true or false, "confidence": 0-100, "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "note": "one short sentence"}`

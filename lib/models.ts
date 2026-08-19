@@ -22,8 +22,8 @@ export const MODEL_MIN_INTERVAL_MS = 60_000
 /** Cooldown applied on RPM/TPM-type 429s (ms). */
 export const RATE_COOLDOWN_MS = 60_000
 
-/** Accept a chunk match only at or above this confidence. */
-export const CONFIDENCE_THRESHOLD = 85
+/** Accept a segment/chunk match only at or above this confidence (strict: >= 90). */
+export const CONFIDENCE_THRESHOLD = 90
 
 /** fps used for the one-time short-video segmentation pass (locked).
  * 15 fps × 60s = 900 frames × 258 tok/frame ≈ 232K tokens — fits under the 250K TPM cap at default resolution. */

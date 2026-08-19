@@ -1,43 +1,92 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Pause, Play, RotateCcw, SplitSquareHorizontal } from 'lucide-react'
-import type { Scan, MatchRegion } from '@/lib/types'
+import type { Scan } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
 
-/** Side-by-side preview of each matched region: short-video segment vs movie segment,
- *  with Previous / Next buttons to step through the regions. */
+/** One comparable pair: a short-video time range mapped to a movie time range of equal duration. */
+interface ComparePair {
+  id: string
+  label: string
+  shortStart: number
+  shortEnd: number
+  movieStart: number
+  movieEnd: number
+  confidence: number
+  speed?: string
+  verified?: { match: boolean; confidence: number; note?: string }
+}
+
+/** Side-by-side preview of matched timelapses. When the frame-by-frame segment map exists,
+ *  every segment (S1, S2, ...) is its own pair with EXACTLY equal durations on both sides.
+ *  Falls back to merged regions for legacy scans. */
 export function ComparePanel({ scan }: { scan: Scan }) {
-  const regions = scan.regions
+  const pairs = useMemo<ComparePair[]>(() => {
+    const sms = scan.segmentMatches || []
+    if (sms.length > 0) {
+      return [...sms]
+        .sort((a, b) => a.segmentIndex - b.segmentIndex)
+        .map((s) => {
+          const region = scan.regions.find((r) => (r.segmentIndexes || []).includes(s.segmentIndex))
+          return {
+            id: `S${s.segmentIndex}`,
+            label: `S${s.segmentIndex}`,
+            shortStart: s.shortStart,
+            shortEnd: s.shortEnd,
+            movieStart: s.movieStart,
+            movieEnd: s.movieEnd,
+            confidence: s.confidence,
+            speed: s.speed,
+            verified: region?.verified
+              ? { match: region.verified.match, confidence: region.verified.confidence, note: region.verified.note }
+              : undefined,
+          }
+        })
+    }
+    return scan.regions.map((r, i) => ({
+      id: r.id,
+      label: `region ${i + 1}`,
+      shortStart: r.shortStart,
+      shortEnd: r.shortEnd,
+      movieStart: r.movieStart,
+      movieEnd: r.movieEnd,
+      confidence: r.maxConfidence,
+      verified: r.verified
+        ? { match: r.verified.match, confidence: r.verified.confidence, note: r.verified.note }
+        : undefined,
+    }))
+  }, [scan.segmentMatches, scan.regions])
+
   const [idx, setIdx] = useState(0)
   const [playing, setPlaying] = useState(false)
   const shortRef = useRef<HTMLVideoElement>(null)
   const movieRef = useRef<HTMLVideoElement>(null)
 
-  const region: MatchRegion | undefined = regions[Math.min(idx, regions.length - 1)]
+  const pair: ComparePair | undefined = pairs[Math.min(idx, pairs.length - 1)]
 
-  // Keep index in range when regions change between refreshes.
+  // Keep index in range when pairs change between refreshes.
   useEffect(() => {
-    if (idx > 0 && idx >= regions.length) setIdx(Math.max(0, regions.length - 1))
-  }, [idx, regions.length])
+    if (idx > 0 && idx >= pairs.length) setIdx(Math.max(0, pairs.length - 1))
+  }, [idx, pairs.length])
 
-  // Seek both players to the region start whenever the region changes.
+  // Seek both players to the pair start whenever the pair changes.
   useEffect(() => {
-    if (!region) return
+    if (!pair) return
     const sv = shortRef.current
     const mv = movieRef.current
     if (sv) {
       sv.pause()
-      sv.currentTime = region.shortStart
+      sv.currentTime = pair.shortStart
     }
     if (mv) {
       mv.pause()
-      mv.currentTime = region.movieStart
+      mv.currentTime = pair.movieStart
     }
     setPlaying(false)
-  }, [region?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pair?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!region) return null
+  if (!pair) return null
 
   function clampLoop(video: HTMLVideoElement | null, start: number, end: number) {
     if (!video) return
@@ -58,8 +107,8 @@ export function ComparePanel({ scan }: { scan: Scan }) {
       setPlaying(false)
     } else {
       // Re-align both to the segment start if either has drifted past the end.
-      if (sv.currentTime >= region!.shortEnd - 0.05) sv.currentTime = region!.shortStart
-      if (mv.currentTime >= region!.movieEnd - 0.05) mv.currentTime = region!.movieStart
+      if (sv.currentTime >= pair!.shortEnd - 0.05) sv.currentTime = pair!.shortStart
+      if (mv.currentTime >= pair!.movieEnd - 0.05) mv.currentTime = pair!.movieStart
       void sv.play()
       void mv.play()
       setPlaying(true)
@@ -69,27 +118,30 @@ export function ComparePanel({ scan }: { scan: Scan }) {
   function restart() {
     const sv = shortRef.current
     const mv = movieRef.current
-    if (sv) sv.currentTime = region!.shortStart
-    if (mv) mv.currentTime = region!.movieStart
+    if (sv) sv.currentTime = pair!.shortStart
+    if (mv) mv.currentTime = pair!.movieStart
   }
 
   const src = (kind: 'short' | 'movie') => `/api/scans/${scan.id}/media?kind=${kind}`
+  const duration = pair.shortEnd - pair.shortStart
+  const isSegmentMode = (scan.segmentMatches || []).length > 0
 
   return (
     <section aria-label="Side-by-side comparison" className="rounded-lg border border-border bg-card p-4">
       <div className="flex flex-wrap items-center gap-2">
         <SplitSquareHorizontal className="size-4 text-primary" aria-hidden />
-        <h2 className="text-sm font-semibold">Side-by-Side Comparison</h2>
+        <h2 className="text-sm font-semibold">{isSegmentMode ? 'Frame-by-Frame Segment Comparison' : 'Side-by-Side Comparison'}</h2>
         <span className="rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">
-          region {idx + 1} / {regions.length}
+          {pair.label} · {idx + 1} / {pairs.length}
         </span>
-        {region.verified && (
+        <span className="rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">{duration.toFixed(3)}s{pair.speed && pair.speed !== '1.0x' ? ` @ ${pair.speed}` : ''}</span>
+        {pair.verified && (
           <span
             className={`rounded-full px-2 py-0.5 font-mono text-xs ${
-              region.verified.match ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'
+              pair.verified.match ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'
             }`}
           >
-            {region.verified.match ? 'verified match' : 'rejected'} · {region.verified.confidence}
+            {pair.verified.match ? 'verified match' : 'rejected'} · {pair.verified.confidence}
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
@@ -103,8 +155,8 @@ export function ComparePanel({ scan }: { scan: Scan }) {
           </button>
           <button
             type="button"
-            onClick={() => setIdx((i) => Math.min(regions.length - 1, i + 1))}
-            disabled={idx >= regions.length - 1}
+            onClick={() => setIdx((i) => Math.min(pairs.length - 1, i + 1))}
+            disabled={idx >= pairs.length - 1}
             className="flex items-center gap-1 rounded-md border border-input px-3 py-1.5 text-xs font-medium hover:bg-secondary disabled:opacity-40"
           >
             Next <ChevronRight className="size-3.5" aria-hidden />
@@ -117,7 +169,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
           <figcaption className="flex flex-col gap-0.5 text-xs sm:flex-row sm:items-center sm:justify-between">
             <span className="font-medium">Short video</span>
             <span className="font-mono text-muted-foreground">
-              {fmtTime(region.shortStart)} – {fmtTime(region.shortEnd)}
+              {fmtTime(pair.shortStart)} – {fmtTime(pair.shortEnd)}
             </span>
           </figcaption>
           <video
@@ -126,7 +178,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
             preload="metadata"
             muted
             playsInline
-            onTimeUpdate={() => clampLoop(shortRef.current, region.shortStart, region.shortEnd)}
+            onTimeUpdate={() => clampLoop(shortRef.current, pair.shortStart, pair.shortEnd)}
             className="aspect-video w-full rounded-md border border-border bg-black object-contain"
           />
         </figure>
@@ -134,7 +186,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
           <figcaption className="flex flex-col gap-0.5 text-xs sm:flex-row sm:items-center sm:justify-between">
             <span className="font-medium">Movie</span>
             <span className="font-mono text-muted-foreground">
-              {fmtTime(region.movieStart)} – {fmtTime(region.movieEnd)}
+              {fmtTime(pair.movieStart)} – {fmtTime(pair.movieEnd)}
             </span>
           </figcaption>
           <video
@@ -143,7 +195,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
             preload="metadata"
             muted
             playsInline
-            onTimeUpdate={() => clampLoop(movieRef.current, region.movieStart, region.movieEnd)}
+            onTimeUpdate={() => clampLoop(movieRef.current, pair.movieStart, pair.movieEnd)}
             className="aspect-video w-full rounded-md border border-border bg-black object-contain"
           />
         </figure>
@@ -165,9 +217,9 @@ export function ComparePanel({ scan }: { scan: Scan }) {
         >
           <RotateCcw className="size-3.5" aria-hidden /> Restart segment
         </button>
-        <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">scan conf {region.maxConfidence}</span>
+        <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">scan conf {pair.confidence}</span>
       </div>
-      {region.verified?.note && <p className="mt-2 text-xs italic text-muted-foreground">{region.verified.note}</p>}
+      {pair.verified?.note && <p className="mt-2 text-xs italic text-muted-foreground">{pair.verified.note}</p>}
     </section>
   )
 }

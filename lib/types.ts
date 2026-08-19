@@ -30,6 +30,26 @@ export interface ShortSegment {
   forensic?: SegmentForensics
 }
 
+/** Frame-accurate mapping of ONE short-video segment to its exact location in the movie.
+ *  This is the final per-segment result: window durations are validated server-side to
+ *  equal the segment's exact duration. Only the best (highest confidence) mapping per
+ *  segment is kept. */
+export interface SegmentMatch {
+  /** short-video segment index (S1, S2, ...) */
+  segmentIndex: number
+  /** seconds within the short video (from the segmentation scene map) */
+  shortStart: number
+  shortEnd: number
+  /** ABSOLUTE seconds within the full movie — exact same duration as the short segment */
+  movieStart: number
+  movieEnd: number
+  confidence: number
+  /** playback speed of the short vs the movie, e.g. "1.0x" */
+  speed: string
+  model: string
+  chunkIndex: number
+}
+
 export interface Candidate {
   id: string
   chunkIndex: number
@@ -55,6 +75,8 @@ export interface MatchRegion {
   shortStart: number
   shortEnd: number
   candidateIds: string[]
+  /** which short-video segments (by index) this region was built from */
+  segmentIndexes?: number[]
   maxConfidence: number
   verified?: {
     match: boolean
@@ -96,6 +118,8 @@ export interface ScanReport {
   modelsUsed: string[]
   earlyStopped: boolean
   regions: MatchRegion[]
+  /** final frame-by-frame per-segment map (exact durations) */
+  segmentMatches?: SegmentMatch[]
 }
 
 export interface Scan {
@@ -115,6 +139,8 @@ export interface Scan {
   movieGuess?: string | null
   /** Scene segments of the short video detected at 20 fps, saved once and reused. */
   shortSegments?: ShortSegment[]
+  /** Frame-accurate per-segment matches accumulated during the scan (best per segment). */
+  segmentMatches?: SegmentMatch[]
   candidates: Candidate[]
   regions: MatchRegion[]
   logs: LogEntry[]

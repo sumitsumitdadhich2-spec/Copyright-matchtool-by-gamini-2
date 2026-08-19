@@ -27,6 +27,44 @@ export function ReportPanel({ scan }: { scan: Scan }) {
         <Stat label="Models used" value={String(report.modelsUsed.length)} />
       </div>
 
+      {(report.segmentMatches || []).length > 0 && (
+        <div className="mt-3">
+          <h3 className="text-xs font-semibold text-muted-foreground">Frame-by-frame segment map (exact durations)</h3>
+          <div className="mt-1.5 overflow-x-auto">
+            <table className="w-full min-w-[560px] text-left text-xs">
+              <thead>
+                <tr className="border-b border-border text-muted-foreground">
+                  <th className="py-1 pr-2 font-medium">Seg</th>
+                  <th className="py-1 pr-2 font-medium">Short video</th>
+                  <th className="py-1 pr-2 font-medium">Movie (exact)</th>
+                  <th className="py-1 pr-2 font-medium">Duration</th>
+                  <th className="py-1 pr-2 font-medium">Speed</th>
+                  <th className="py-1 pr-2 font-medium">Conf</th>
+                  <th className="py-1 font-medium">Model</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono">
+                {(report.segmentMatches || []).map((s) => (
+                  <tr key={s.segmentIndex} className="border-b border-border/50">
+                    <td className="py-1 pr-2 font-semibold">S{s.segmentIndex}</td>
+                    <td className="py-1 pr-2">
+                      {fmtTime(s.shortStart)} – {fmtTime(s.shortEnd)}
+                    </td>
+                    <td className="py-1 pr-2 text-success">
+                      {fmtTime(s.movieStart)} – {fmtTime(s.movieEnd)}
+                    </td>
+                    <td className="py-1 pr-2">{(s.movieEnd - s.movieStart).toFixed(3)}s</td>
+                    <td className="py-1 pr-2">{s.speed}</td>
+                    <td className="py-1 pr-2">{s.confidence}</td>
+                    <td className="py-1 text-muted-foreground">{s.model.replace('gemini-', '')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {report.regions.length === 0 ? (
         <p className="mt-3 text-sm text-muted-foreground">No matches found — the short video does not appear in this movie.</p>
       ) : (
@@ -44,6 +82,12 @@ export function ReportPanel({ scan }: { scan: Scan }) {
                 <span className="text-xs text-muted-foreground">
                   short {fmtTime(r.shortStart)}–{fmtTime(r.shortEnd)}
                 </span>
+                {r.segmentIndexes && r.segmentIndexes.length > 0 && (
+                  <span className="rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">
+                    S{r.segmentIndexes[0]}
+                    {r.segmentIndexes.length > 1 ? `–S${r.segmentIndexes[r.segmentIndexes.length - 1]}` : ''}
+                  </span>
+                )}
                 <span className="ml-auto flex items-center gap-2">
                   {r.verified && (
                     <span

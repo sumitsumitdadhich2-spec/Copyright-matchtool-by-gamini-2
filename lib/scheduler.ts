@@ -1,7 +1,7 @@
 import path from 'node:path'
 import crypto from 'node:crypto'
 import type { GoogleGenAI } from '@google/genai'
-import type { Scan, Candidate, MatchRegion } from './types'
+import type { Scan, Candidate, MatchRegion, SegmentMatch } from './types'
 import {
   MODEL_POOL,
   MODEL_MIN_INTERVAL_MS,
@@ -201,6 +201,7 @@ class Scheduler {
       modelsUsed: MODEL_POOL.filter((m) => getModelUsage(m.id, job.apiKey) > 0).map((m) => m.id),
       earlyStopped: scan.earlyStopped,
       regions: scan.regions,
+      segmentMatches: scan.segmentMatches || [],
     }
     addLog(scan, 'success', `Scan complete: ${scan.regions.filter((r) => r.selected).length} final match region(s)`) 
     cleanupChunks(path.join(mediaDir, 'chunks'))
@@ -348,8 +349,17 @@ class Scheduler {
             addLog(scan, 'warn', `chunk ${chunkIndex}: duration check — ${d.slice(0, 200)}`)
           }
         }
+        // STRICT per-segment acceptance: every segment window must individually be >= threshold.
+        const validAccepted = enforced ? enforced.valid.filter((v) => v.confidence >= CONFIDENCE_THRESHOLD) : []
+        if (enforced) {
+          for (const v of enforced.valid) {
+            if (v.confidence < CONFIDENCE_THRESHOLD) {
+              addLog(scan, 'info', `chunk ${chunkIndex}: S${v.segmentIndex} conf ${v.confidence} < ${CONFIDENCE_THRESHOLD} — rejected (strict threshold)`)
+            }
+          }
+        }
         const accepted = enforced
-          ? enforced.match && enforced.confidence >= CONFIDENCE_THRESHOLD
+          ? validAccepted.length > 0
           : result.match && result.confidence >= CONFIDENCE_THRESHOLD
 
         if (accepted) {
@@ -360,11 +370,39 @@ class Scheduler {
           let confidence: number
           if (enforced) {
             // Rebuild all ranges strictly from VALIDATED per-segment windows.
-            const v = enforced.valid
+            const v = validAccepted
             chunkSeg = [Math.min(...v.map((x) => x.chunkStart)), Math.max(...v.map((x) => x.chunkEnd))]
             shortSeg = [Math.min(...v.map((x) => x.shortStart)), Math.max(...v.map((x) => x.shortEnd))]
             matchedIds = v.map((x) => `S${x.segmentIndex}`).join(', ')
-            confidence = enforced.confidence
+            confidence = Math.max(...v.map((x) => x.confidence))
+            // FRAME-BY-FRAME MAP: persist each validated segment window as an exact
+            // short↔movie mapping. Keep only the best mapping per segment.
+            if (!scan.segmentMatches) scan.segmentMatches = []
+            for (const x of v) {
+              const sm: SegmentMatch = {
+                segmentIndex: x.segmentIndex,
+                shortStart: x.shortStart,
+                shortEnd: x.shortEnd,
+                movieStart: base + x.chunkStart,
+                movieEnd: base + x.chunkEnd,
+                confidence: x.confidence,
+                speed: x.speed || '1.0x',
+                model: m.id,
+                chunkIndex,
+              }
+              const existing = scan.segmentMatches.find((e) => e.segmentIndex === x.segmentIndex)
+              if (!existing) {
+                scan.segmentMatches.push(sm)
+              } else if (sm.confidence > existing.confidence) {
+                Object.assign(existing, sm)
+              }
+              addLog(
+                scan,
+                'success',
+                `  S${x.segmentIndex} mapped: short ${x.shortStart.toFixed(3)}s-${x.shortEnd.toFixed(3)}s ↔ movie ${(base + x.chunkStart).toFixed(3)}s-${(base + x.chunkEnd).toFixed(3)}s (${(x.chunkEnd - x.chunkStart).toFixed(3)}s @ ${x.speed || '1.0x'}, conf ${x.confidence})`,
+              )
+            }
+            scan.segmentMatches.sort((a, b) => a.segmentIndex - b.segmentIndex)
           } else {
             chunkSeg = parseSegment(result.chunk_segment) || [0, CHUNK_SECONDS]
             shortSeg = parseSegment(result.short_segment) || [0, scan.shortDuration || 60]
@@ -457,12 +495,14 @@ class Scheduler {
     }
   }
 
-  /** True when accepted candidates jointly cover the entire short video (2s tolerance). */
+  /** True when accepted matches jointly cover the entire short video (2s tolerance).
+   *  Uses the frame-by-frame segment map when available (strict), candidates otherwise. */
   private shortFullyCovered(scan: Scan): boolean {
     if (!scan.shortDuration) return false
-    const intervals = scan.candidates
-      .map((c) => c.shortSegment)
-      .sort((a, b) => a[0] - b[0])
+    const sms = scan.segmentMatches || []
+    const intervals: [number, number][] = (
+      sms.length > 0 ? sms.map((s) => [s.shortStart, s.shortEnd] as [number, number]) : scan.candidates.map((c) => c.shortSegment)
+    ).sort((a, b) => a[0] - b[0])
     let covered = 0
     let curStart = -1
     let curEnd = -1
@@ -479,18 +519,54 @@ class Scheduler {
     return covered >= scan.shortDuration - 2
   }
 
-  /** Merge adjacent/overlapping candidates into regions, then verify each at 14fps. */
-  private async verificationPass(job: Job) {
-    const { scan } = job
-    if (scan.candidates.length === 0) {
-      scan.regions = []
-      return
+  /** Build verification regions. STRICT: when a frame-by-frame segment map exists, regions
+   *  are built ONLY from validated segment matches — consecutive segments are merged ONLY
+   *  when their movie windows are contiguous in the same way as their short windows, so a
+   *  region's movie duration always equals its short duration. Never merge across distant
+   *  movie positions. */
+  private buildRegions(scan: Scan): MatchRegion[] {
+    const sms = scan.segmentMatches || []
+    if (sms.length > 0) {
+      const sorted = [...sms].sort((a, b) => a.segmentIndex - b.segmentIndex)
+      const regions: MatchRegion[] = []
+      let group: SegmentMatch[] = []
+      const flush = () => {
+        if (group.length === 0) return
+        regions.push({
+          id: crypto.randomBytes(6).toString('hex'),
+          movieStart: group[0].movieStart,
+          movieEnd: group[group.length - 1].movieEnd,
+          shortStart: group[0].shortStart,
+          shortEnd: group[group.length - 1].shortEnd,
+          candidateIds: [],
+          segmentIndexes: group.map((g) => g.segmentIndex),
+          maxConfidence: Math.max(...group.map((g) => g.confidence)),
+        })
+        group = []
+      }
+      for (const sm of sorted) {
+        const prev = group[group.length - 1]
+        if (!prev) {
+          group.push(sm)
+          continue
+        }
+        const shortGap = sm.shortStart - prev.shortEnd
+        const movieGap = sm.movieStart - prev.movieEnd
+        // Merge only truly consecutive segments whose movie windows line up the same
+        // way (same gap within 1s) — keeps short/movie region durations equal.
+        const contiguous =
+          sm.segmentIndex === prev.segmentIndex + 1 && movieGap >= -0.5 && Math.abs(movieGap - shortGap) <= 1.0
+        if (contiguous) group.push(sm)
+        else {
+          flush()
+          group.push(sm)
+        }
+      }
+      flush()
+      return regions
     }
-    scan.status = 'verifying'
-    addLog(scan, 'info', 'Starting final verification pass (14 fps)...')
-    this.mark(job)
 
-    // Merge candidates whose absolute movie segments overlap or sit in adjacent chunks.
+    // Legacy fallback (no segment map): merge adjacent/overlapping candidates.
     const sorted = [...scan.candidates].sort((a, b) => a.absSegment[0] - b.absSegment[0])
     const regions: MatchRegion[] = []
     for (const c of sorted) {
@@ -514,7 +590,25 @@ class Scheduler {
         })
       }
     }
+    return regions
+  }
+
+  /** Merge matches into regions, then verify each at 14fps. */
+  private async verificationPass(job: Job) {
+    const { scan } = job
+    if (scan.candidates.length === 0 && (scan.segmentMatches || []).length === 0) {
+      scan.regions = []
+      return
+    }
+    scan.status = 'verifying'
+    addLog(scan, 'info', 'Starting final verification pass (14 fps)...')
+    this.mark(job)
+
+    const regions = this.buildRegions(scan)
     scan.regions = regions
+    if ((scan.segmentMatches || []).length > 0) {
+      addLog(scan, 'info', `Regions built from the frame-by-frame segment map: ${regions.length} region(s), each with equal short/movie duration`)
+    }
     addLog(scan, 'info', `${regions.length} merged match region(s) to verify`)
     this.mark(job)
 
