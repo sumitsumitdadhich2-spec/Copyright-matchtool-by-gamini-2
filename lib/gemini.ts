@@ -342,6 +342,13 @@ METHOD (follow strictly, segment by segment):
 4. A match is valid ONLY if ALL five tests pass. This must be the exact same take — the same recording, frame for frame.
 5. DURATION CHECK: the matched chunk range must have almost the same duration as the segment. If durations differ, check whether the short clip was slowed down or sped up, and report it in "speed". If durations differ and there is no speed change, it is NOT a valid match.
 
+ANTI-ECHO RULE (violating this invalidates your whole answer):
+- The timestamps in the SEGMENTS list above describe positions in VIDEO 1 (the short). They tell you NOTHING about where footage sits inside Video 2.
+- COPYING a segment's start/end timestamps from the list above into "chunk_start"/"chunk_end" is FORBIDDEN. Video 2 is a different file with its own timeline — chunk_start/chunk_end MUST be read off Video 2's own clock by actually locating the frames there.
+- It is statistically near-impossible for many segments to sit at the SAME timestamps in the chunk as in the short. If your answer maps segment after segment to identical timestamps (e.g. S5 at 00:10.400-00:12.000 in the short AND at 00:10.400-00:12.000 in the chunk, S6 likewise, ...), you have NOT compared the videos — you have echoed the input. STOP, discard that answer, and re-examine Video 2 frame by frame.
+- Claiming "the entire short matches this chunk cut-for-cut, every segment in order" requires the strongest possible evidence: for EACH segment your "evidence" field must cite a concrete visual fingerprint you saw in VIDEO 2 at that exact position (a background object, on-screen text, an extra's position). Generic evidence like "same scene, same actors" is NOT acceptable for such a claim.
+- If you cannot genuinely locate a segment's frames inside Video 2, report NO match for it. An honest "no match" is correct; an echoed timestamp is a critical failure.
+
 CRITICAL WARNINGS (false positives must be ELIMINATED):
 - Movies contain many similar-looking scenes: same actors, same location, same costumes, similar framing. These are NOT matches. A different moment or a different take of the same scene must be REJECTED even if it looks 90% similar.
 - Matching only on the description (e.g. "boy runs to bottle" appears in both) is FORBIDDEN. The frames themselves must be identical.
@@ -384,6 +391,7 @@ Output strict JSON only, nothing else:
 
 Rules:
 - NEVER answer with the whole minute (e.g. chunk range 00:00-01:00). Every match MUST be an individual entry in "segment_matches" with its own exact-duration chunk_start/chunk_end. A match without a per-segment exact-duration window will be DISCARDED by the server.
+- The server compares your chunk_start/chunk_end values against the segment list. If most of your matches simply repeat the segments' own short-video timestamps, the entire answer is treated as an echo and DISCARDED. chunk timestamps must come from Video 2's timeline, found by real frame comparison.
 - "segment_matches" contains ONLY segments that passed all five tests with confidence >= 90.
 - Each segment_matches entry MUST be an exact frame-mapped window: (chunk_end - chunk_start) MUST equal that segment's duration_seconds (adjusted only for a verified speed change). The server measures this and rejects any window that fails.
 - "rejected_lookalikes" must list any similar-looking footage you found and WHY you rejected it — this proves you checked properly.
@@ -405,6 +413,8 @@ METHOD (strict):
 4. Aspect ratios may differ (the short may be cropped for vertical format) and colors may be graded/filtered — that is acceptable. Different takes, different moments, or different scenes are NOT.
 
 CONFIDENCE (strict): 90+ ONLY if this is verifiably the same recording frame for frame. Below 90 = reject. A false positive is worse than a miss.
+
+WARNING: The scan that flagged this match may itself have been WRONG (models sometimes echo timestamps without comparing frames). Do NOT assume the clips match just because they were flagged. Your job is to independently DISPROVE the match; only confirm it if the first-frame, last-frame, and parallel-timeline checks genuinely pass. In your "note", cite one concrete visual detail you verified in BOTH clips.
 
 Answer in strict JSON, nothing else:
 {"match": true or false, "confidence": 0-100, "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "note": "one short sentence"}`
