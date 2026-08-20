@@ -1,6 +1,8 @@
 // Locked model pool: ONLY models with 250K TPM on the free tier.
-// Each scan request is ~217K tokens at 7 fps, so every model is
-// effectively limited to 1 request per minute by TPM regardless of RPM.
+// Real measured rate at DEFAULT media resolution is ~65 tokens/frame (NOT 258 —
+// that figure only applies to MEDIA_RESOLUTION_HIGH, which we never use).
+// Each scan request (short ~60-90s + 60s chunk @ 24 fps) is ~190K-234K tokens,
+// so every model is effectively limited to 1 request per minute by TPM regardless of RPM.
 export interface ModelSpec {
   id: string
   rpm: number
@@ -16,7 +18,8 @@ export const MODEL_POOL: ModelSpec[] = [
   { id: 'gemini-2.5-flash-lite', rpm: 10, rpd: 20 },
 ]
 
-/** Minimum spacing between requests per model (ms). TPM 250K vs ~217K tokens/request => 1 req/min. */
+/** Minimum spacing between requests per model (ms). TPM 250K vs ~190K tokens/request
+ * (short + chunk @ 24 fps × 65 tok/frame at default resolution) => 1 req/min. */
 export const MODEL_MIN_INTERVAL_MS = 60_000
 
 /** Cooldown applied on RPM/TPM-type 429s (ms). */
@@ -26,21 +29,22 @@ export const RATE_COOLDOWN_MS = 60_000
 export const CONFIDENCE_THRESHOLD = 90
 
 /** fps used for the one-time short-video segmentation pass (locked).
- * 15 fps × 60s = 900 frames × 258 tok/frame ≈ 232K tokens — fits under the 250K TPM cap at default resolution. */
-export const SEGMENT_FPS = 15
+ * 24 fps × 60s = 1,440 frames × 65 tok/frame ≈ 93.6K tokens — fits under the 250K TPM cap at default resolution. */
+export const SEGMENT_FPS = 24
 
-/** fps used during the main scan (locked). */
-export const SCAN_FPS = 7
+/** fps used during the main scan (locked).
+ * Short + 60s chunk together @ 24 fps × 65 tok/frame ≈ ~190K tokens — under the 250K TPM cap at default resolution. */
+export const SCAN_FPS = 24
 
 /** fps used during the final verification pass (locked). */
-export const VERIFY_FPS = 14
+export const VERIFY_FPS = 24
 
 /** fps for LIVE per-segment verification (2-key flow). Both clips are short (<30s combined),
  * so 24fps at default resolution stays well under the 250K TPM cap. */
 export const VERIFY_LIVE_FPS = 24
 
-/** fps for the 13fps RESCAN after a verifier rejection: full 1-minute chunk + the rejected
- * short clip in one request. 13fps × ~65s combined ≈ 218K tokens — fits under 250K TPM. */
-export const RESCAN_FPS = 13
+/** fps for the 24fps RESCAN after a verifier rejection: full 1-minute chunk + the rejected
+ * short clip in one request. 24fps × ~65s combined = ~1,560 frames × 65 tok/frame ≈ 101K tokens — fits under 250K TPM. */
+export const RESCAN_FPS = 24
 
 export const CHUNK_SECONDS = 60

@@ -15,7 +15,7 @@ function verifyBadge(v?: SegmentVerification) {
     case 'verifying':
       return { label: 'verifying @24fps', cls: 'bg-warning/15 text-warning' }
     case 'rescanning':
-      return { label: 're-scanning @13fps', cls: 'bg-warning/15 text-warning' }
+      return { label: 're-scanning @24fps', cls: 'bg-warning/15 text-warning' }
     default:
       return { label: 'pending verification', cls: 'bg-secondary text-muted-foreground' }
   }
@@ -140,7 +140,7 @@ export function ReportPanel({ scan }: { scan: Scan }) {
       )}
       {selected.length > 0 && (
         <p className="mt-2 text-xs text-muted-foreground">
-          {selected.length} region(s) selected as final answer after the 14 fps verification pass.
+          {selected.length} region(s) selected as final answer after the 24 fps verification pass.
         </p>
       )}
     </section>

@@ -153,7 +153,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
               : pair.verification.state === 'rejected_final'
                 ? 'REJECTED by Verifier (API 2)'
                 : pair.verification.state === 'rescanning'
-                  ? 're-scanning @13fps'
+                  ? 're-scanning @24fps'
                   : pair.verification.state === 'verifying'
                     ? 'verifying @24fps'
                     : 'pending verification'}
