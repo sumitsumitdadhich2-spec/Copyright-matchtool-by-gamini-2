@@ -426,16 +426,16 @@ async function generate(
   ai: GoogleGenAI,
   model: string,
   parts: object[],
-  lowResolution = false,
 ): Promise<ChunkScanResult> {
   try {
+    // Default media resolution ONLY (~65 tok/frame measured). Never set mediaResolution —
+    // MEDIA_RESOLUTION_HIGH quadruples cost to ~257 tok/frame.
     const resp = await ai.models.generateContent({
       model,
       contents: [{ role: 'user', parts: parts as never }],
       config: {
         responseMimeType: 'application/json',
         temperature: 0,
-        ...(lowResolution ? { mediaResolution: 'MEDIA_RESOLUTION_LOW' as never } : {}),
       },
     })
     const text = resp.text
@@ -599,17 +599,12 @@ export async function verifyRequest(
   movieSegUri: string,
 ): Promise<ChunkScanResult> {
   // 24 fps at default resolution ≈ 1,561 tokens/sec of video (24 × 65 tok/frame) → ~160s combined fits in 250K TPM.
-  // Low resolution costs the same as default (~65 tok/frame); kept for backward compatibility.
-  return generate(
-    ai,
-    model,
-    [
-      { fileData: { fileUri: shortSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
-      { fileData: { fileUri: movieSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
-      { text: VERIFY_PROMPT },
-    ],
-    true,
-  )
+  // Default media resolution everywhere — never set mediaResolution (HIGH quadruples cost to ~257 tok/frame).
+  return generate(ai, model, [
+    { fileData: { fileUri: shortSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
+    { fileData: { fileUri: movieSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
+    { text: VERIFY_PROMPT },
+  ])
 }
 
 // ---------- LIVE per-segment verification (2-key flow) ----------
