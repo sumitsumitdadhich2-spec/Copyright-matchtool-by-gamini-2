@@ -91,7 +91,7 @@ export function chunkPath(outDir: string, index: number): string {
   return path.join(outDir, `chunk-${String(index).padStart(4, '0')}.mp4`)
 }
 
-/** Extract a sub-segment from a video (used for the 14fps verification pass). */
+/** Extract a sub-segment from a video (used for the 24fps verification pass). */
 export async function extractSegment(
   sourceFile: string,
   start: number,

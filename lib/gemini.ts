@@ -258,7 +258,7 @@ const SEGMENT_PROMPT = `You are a forensic video analyst working for a Copyright
 
 TASK: Split this short video into its individual scene segments (every cut = new segment), and write a FORENSIC-LEVEL description of each segment. These descriptions will later be used to locate the exact same footage inside the full movie, so they must be detailed enough that the segment can NEVER be confused with a similar-looking scene from the same movie.
 
-Analyze the video at 15 fps precision. All timestamps must be in mm:ss.mmm format (millisecond precision), and segment boundaries must be frame-accurate (aligned to 1/15s = 0.067s steps).
+Analyze the video at 24 fps precision. All timestamps must be in mm:ss.mmm format (millisecond precision), and segment boundaries must be frame-accurate (aligned to 1/24s = 0.0417s steps).
 
 For EACH segment, describe ALL of the following:
 1. ACTION TIMELINE: exactly what happens from the first frame to the last frame, in order, with the timing of each movement (e.g. "boy takes 3 steps, kneels at 0.4s into the segment, grabs bottle with right hand at 0.9s").
@@ -426,7 +426,6 @@ async function generate(
   ai: GoogleGenAI,
   model: string,
   parts: object[],
-  lowResolution = false,
 ): Promise<ChunkScanResult> {
   try {
     const resp = await ai.models.generateContent({
@@ -435,7 +434,9 @@ async function generate(
       config: {
         responseMimeType: 'application/json',
         temperature: 0,
-        ...(lowResolution ? { mediaResolution: 'MEDIA_RESOLUTION_LOW' as never } : {}),
+        // DEFAULT media resolution only (~65 tok/frame, measured). Never set
+        // mediaResolution: LOW/MEDIUM behave the same as default, and HIGH
+        // quadruples cost to ~257 tok/frame.
       },
     })
     const text = resp.text
@@ -462,7 +463,7 @@ function toSecondsMs(t: string): number | null {
   return h * 3600 + min * 60 + sec
 }
 
-/** One-time segmentation pass: whole short video at 20 fps → movie guess + scene segments. */
+/** One-time segmentation pass: whole short video at 24 fps → movie guess + scene segments. */
 export async function segmentShortRequest(
   ai: GoogleGenAI,
   model: string,
@@ -483,7 +484,7 @@ export async function segmentShortRequest(
       config: {
         responseMimeType: 'application/json',
         temperature: 0,
-        // 15 fps × 60s = 900 frames × 258 tok/frame ≈ 232K tokens — fits under the 250K TPM cap at default resolution.
+        // 24 fps × 60s = 1,440 frames × 65 tok/frame ≈ 93.6K tokens — fits under the 250K TPM cap at default resolution.
       },
     })
     const text = resp.text
@@ -574,7 +575,8 @@ export function segmentsToPromptText(segments: ShortSegment[]): string {
   return `${mapBlock}\n\n${segments.map((s) => `S${s.index}: ${fmt(s.start)}-${fmt(s.end)} — ${s.description}`).join('\n')}`
 }
 
-/** Main scan request: short video + one movie chunk at 7 fps, default media resolution. */
+/** Main scan request: short video + one movie chunk at 24 fps, default media resolution.
+ * Short (~60-90s) + 60s chunk @ 24 fps × 65 tok/frame ≈ ~190K-234K tokens — fits under 250K TPM. */
 export async function scanChunkRequest(
   ai: GoogleGenAI,
   model: string,
@@ -590,25 +592,20 @@ export async function scanChunkRequest(
   ])
 }
 
-/** Verification request: matched short segment vs matched movie segment at 14 fps. */
+/** Verification request: matched short segment vs matched movie segment at 24 fps. */
 export async function verifyRequest(
   ai: GoogleGenAI,
   model: string,
   shortSegUri: string,
   movieSegUri: string,
 ): Promise<ChunkScanResult> {
-  // 14 fps at default resolution = ~3.6K tokens/sec of video → only ~69s combined fits in 250K TPM.
-  // Low resolution (~0.92K tokens/sec) allows ~4.5 minutes combined — required for longer regions.
-  return generate(
-    ai,
-    model,
-    [
-      { fileData: { fileUri: shortSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
-      { fileData: { fileUri: movieSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
-      { text: VERIFY_PROMPT },
-    ],
-    true,
-  )
+  // 24 fps at default resolution ≈ 1,561 tokens/sec of video (24 × 65) →
+  // ~160s combined fits in 250K TPM. Default resolution only — never use HIGH (~257 tok/frame).
+  return generate(ai, model, [
+    { fileData: { fileUri: shortSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
+    { fileData: { fileUri: movieSegUri, mimeType: 'video/mp4' }, videoMetadata: { fps: VERIFY_FPS } },
+    { text: VERIFY_PROMPT },
+  ])
 }
 
 // ---------- LIVE per-segment verification (2-key flow) ----------
@@ -681,7 +678,7 @@ export async function liveVerifyRequest(
   }
 }
 
-/** Context handed to the 13fps rescan after a verifier rejection. */
+/** Context handed to the 24 fps rescan after a verifier rejection. */
 export interface RescanHistory {
   segmentIndex: number
   segmentDuration: number
@@ -743,7 +740,8 @@ Output strict JSON only, nothing else:
 If nothing matches: {"match": false, "confidence": 0, "segment_matches": [], "rejected_lookalikes": [...], "short_segment": "", "chunk_segment": "", "note": "..."}`
 }
 
-/** 13fps RESCAN after a verifier rejection: full 1-minute chunk + rejected short clip + history, one request. */
+/** 24 fps RESCAN after a verifier rejection: full 1-minute chunk + rejected short clip + history,
+ * one request. 24 fps × ~65s combined × 65 tok/frame ≈ 101K tokens — fits under 250K TPM. */
 export async function rescanSegmentRequest(
   ai: GoogleGenAI,
   model: string,

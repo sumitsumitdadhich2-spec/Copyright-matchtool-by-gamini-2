@@ -66,7 +66,7 @@ interface Job {
   /** scan-phase chunk queue */
   queue: number[]
   inFlight: Set<number>
-  /** live verification task queue (verify @24fps / rescan @13fps) */
+  /** live verification task queue (verify @24fps / rescan @24fps) */
   verifyQueue: VerifyTask[]
   verifyInFlight: Set<number>
   /** transient error counter per segment so a flaky segment can't loop forever */
@@ -297,7 +297,7 @@ class Scheduler {
     this.finish(job)
   }
 
-  /** Phase 1: send the whole short video at 15 fps → movie guess + millisecond scene segments. */
+  /** Phase 1: send the whole short video at 24 fps → movie guess + millisecond scene segments. */
   private async segmentShort(job: Job) {
     const { scan } = job
     const lane = job.lanes[0]
@@ -721,7 +721,7 @@ class Scheduler {
     }
   }
 
-  /** Execute one live verification task (verify @24fps or rescan @13fps).
+  /** Execute one live verification task (verify @24fps or rescan @24fps).
    *  Returns false when this worker must exit (RPD exhausted / model retired). */
   private async runVerifyTask(job: Job, lane: KeyLane, m: ModelSpec, task: VerifyTask): Promise<boolean> {
     const { scan } = job
@@ -788,14 +788,14 @@ class Scheduler {
             sm.verification.reason = reason
             sm.verification.rejectedWindow = [sm.movieStart, sm.movieEnd]
             // Release the in-flight lock BEFORE enqueueing — enqueueVerify silently
-            // drops segments still marked in-flight, which would lose the 13fps re-scan.
+            // drops segments still marked in-flight, which would lose the 24fps re-scan.
             job.verifyInFlight.delete(sm.segmentIndex)
             this.enqueueVerify(job, sm.segmentIndex, 'rescan')
-            addLog(scan, 'warn', `S${sm.segmentIndex} REJECTED @24fps — queuing 13fps re-scan of chunk ${sm.chunkIndex} with rejection context: ${reason.slice(0, 140)}`)
+            addLog(scan, 'warn', `S${sm.segmentIndex} REJECTED @24fps — queuing 24fps re-scan of chunk ${sm.chunkIndex} with rejection context: ${reason.slice(0, 140)}`)
           }
         }
       } else {
-        // ----- 13fps rescan: full chunk minute + the rejected short clip + history -----
+        // ----- 24fps rescan: full chunk minute + the rejected short clip + history -----
         const seg = (scan.shortSegments || []).find((s) => s.index === sm.segmentIndex)
         if (!seg) {
           sm.verification.state = 'rejected_final'
@@ -803,7 +803,7 @@ class Scheduler {
           this.onSegmentRejectedFinal(job, sm)
           return true
         }
-        addLog(scan, 'info', `re-scan S${sm.segmentIndex} @13fps in chunk ${sm.chunkIndex} → ${m.id} (key ${lane.idx})`)
+        addLog(scan, 'info', `re-scan S${sm.segmentIndex} @24fps in chunk ${sm.chunkIndex} → ${m.id} (key ${lane.idx})`)
         this.mark(job)
 
         const base = sm.chunkIndex * CHUNK_SECONDS
@@ -856,7 +856,7 @@ class Scheduler {
           )
         } else {
           sm.verification.state = 'rejected_final'
-          sm.verification.reason = `${sm.verification.reason || 'verifier rejection'} | 13fps re-scan of chunk ${sm.chunkIndex} found no same-to-same window (${result.note?.slice(0, 120) || 'no note'})`
+          sm.verification.reason = `${sm.verification.reason || 'verifier rejection'} | 24fps re-scan of chunk ${sm.chunkIndex} found no same-to-same window (${result.note?.slice(0, 120) || 'no note'})`
           addLog(scan, 'error', `S${sm.segmentIndex} REJECTED (final): re-scan found no valid window in chunk ${sm.chunkIndex}`)
           // The window in THIS chunk is dead — promote an alternate from another chunk,
           // or re-queue every chunk that skipped this segment so it keeps being hunted.
@@ -1077,7 +1077,7 @@ class Scheduler {
   }
 
   /** Merge matches into regions. When the LIVE 24fps per-segment verification ran, region
-   *  verdicts are derived directly from it (no duplicate model calls). The legacy 14fps
+   *  verdicts are derived directly from it (no duplicate model calls). The legacy 24fps
    *  region pass only runs for candidate-only scans with no segment map. */
   private async verificationPass(job: Job) {
     const { scan } = job
@@ -1124,8 +1124,8 @@ class Scheduler {
       return
     }
 
-    // ----- Legacy path (no segment map): 14fps region verification -----
-    addLog(scan, 'info', 'Starting final verification pass (14 fps)...')
+    // ----- Legacy path (no segment map): 24fps region verification -----
+    addLog(scan, 'info', 'Starting final verification pass (24 fps)...')
     addLog(scan, 'info', `${regions.length} merged match region(s) to verify`)
     this.mark(job)
 
@@ -1150,7 +1150,7 @@ class Scheduler {
         job.lastRequestAt[rk] = Date.now()
         const used = incrementModelUsage(model.id, lane.apiKey)
         this.modelState(job, lane, model).usedToday = used
-        addLog(scan, 'info', `verifying region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} → ${model.id} @14fps (key ${lane.idx})`)
+        addLog(scan, 'info', `verifying region ${fmt(region.movieStart)}-${fmt(region.movieEnd)} → ${model.id} @24fps (key ${lane.idx})`)
         this.mark(job)
 
         const su = await uploadVideo(lane.ai, shortSeg)

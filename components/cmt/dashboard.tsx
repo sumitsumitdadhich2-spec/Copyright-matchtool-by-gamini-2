@@ -69,7 +69,7 @@ export function Dashboard() {
           </span>
           <div>
             <h1 className="text-lg font-semibold leading-tight">Copyright Match Tool</h1>
-            <p className="text-xs text-muted-foreground">Gemini-powered clip-in-movie scanner · 7 fps scan · 14 fps verify</p>
+            <p className="text-xs text-muted-foreground">Gemini-powered clip-in-movie scanner · 24 fps scan · 24 fps verify</p>
           </div>
         </div>
 
@@ -77,7 +77,7 @@ export function Dashboard() {
           {(status === 'scanning' || status === 'verifying') && (
             <span className="flex items-center gap-1.5 rounded-full bg-primary/15 px-3 py-1 text-xs text-primary">
               <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              {status === 'verifying' ? 'Verifying at 14 fps...' : 'Scanning...'}
+              {status === 'verifying' ? 'Verifying at 24 fps...' : 'Scanning...'}
             </span>
           )}
           <button
