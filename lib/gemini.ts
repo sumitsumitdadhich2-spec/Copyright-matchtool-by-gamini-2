@@ -337,10 +337,18 @@ ${segmentsText}
 
 TASK: For EACH segment listed above, determine whether the IDENTICAL footage appears anywhere inside this one-minute chunk, and if it does, report the EXACT time range inside the chunk. You have BOTH videos in front of you — do NOT match based on the text descriptions alone. The descriptions only tell you WHAT to look for; the final decision must come from directly comparing the actual frames of Video 1 against the actual frames of Video 2.
 
+REALITY CHECK (read before you start):
+- This chunk is ONE minute out of a full movie, while the short's segments are scattered across the whole film. A typical chunk contains ZERO segments; a lucky chunk contains one or a few.
+- Finding MANY segments in one chunk is an extraordinary claim. If your draft answer claims most of the listed segments are in this single minute, assume YOU made an error, restart, and re-verify each one against Video 2's actual frames.
+- The segments' positions inside the short video are deliberately NOT given to you. The ONLY timeline you can report from is Video 2's own clock (00:00.000 to ~01:00.000). Any timestamp you output must correspond to frames you actually saw at that position in Video 2.
+
+MANDATORY STEP 0 — CHUNK INVENTORY (do this BEFORE looking at any segment):
+Watch Video 2 alone, start to finish, and write a "chunk_inventory": 3-8 short lines describing what actually happens in THIS chunk with time ranges from Video 2's own clock (e.g. "00:00-00:14 wide shot of a market street, vendor in red...", "00:14-00:31 interior kitchen, woman chopping..."). Every match you report later MUST be consistent with this inventory — a claimed match at a position whose inventory line describes different content proves you did not look.
+
 DURATION LOCK (most important rule):
 - Every segment has an EXACT duration (duration_seconds in the list above). When you search this chunk, you are looking for a window of EXACTLY that many seconds — no more, no less.
 - Example: if a segment lasts 0.875 seconds, find the 0.875-second window in this chunk that contains it. Report chunk_start and chunk_end so that (chunk_end - chunk_start) equals the segment's duration within ±0.10s.
-- The scene change map above is authoritative: each segment begins and ends exactly at a cut. The matched chunk window must start on the same frame the segment starts on and end on the same frame the segment ends on.
+- The duration table above is authoritative: each segment begins and ends exactly at a cut. The matched chunk window must start on the same frame the segment starts on and end on the same frame the segment ends on.
 - If the only candidate window has a different duration, first check for a speed change (slowed/sped up) and report it in "speed" with the scaled duration justified. If durations differ and there is no speed change, it is NOT a match — reject it as a false positive.
 
 METHOD (follow strictly, segment by segment):
@@ -357,11 +365,10 @@ METHOD (follow strictly, segment by segment):
 5. DURATION CHECK: the matched chunk range must have almost the same duration as the segment. If durations differ, check whether the short clip was slowed down or sped up, and report it in "speed". If durations differ and there is no speed change, it is NOT a valid match.
 
 ANTI-ECHO RULE (violating this invalidates your whole answer):
-- The timestamps in the SEGMENTS list above describe positions in VIDEO 1 (the short). They tell you NOTHING about where footage sits inside Video 2.
-- COPYING a segment's start/end timestamps from the list above into "chunk_start"/"chunk_end" is FORBIDDEN. Video 2 is a different file with its own timeline — chunk_start/chunk_end MUST be read off Video 2's own clock by actually locating the frames there.
-- It is statistically near-impossible for many segments to sit at the SAME timestamps in the chunk as in the short. If your answer maps segment after segment to identical timestamps (e.g. S5 at 00:10.400-00:12.000 in the short AND at 00:10.400-00:12.000 in the chunk, S6 likewise, ...), you have NOT compared the videos — you have echoed the input. STOP, discard that answer, and re-examine Video 2 frame by frame.
-- Claiming "the entire short matches this chunk cut-for-cut, every segment in order" requires the strongest possible evidence: for EACH segment your "evidence" field must cite a concrete visual fingerprint you saw in VIDEO 2 at that exact position (a background object, on-screen text, an extra's position). Generic evidence like "same scene, same actors" is NOT acceptable for such a claim.
-- If you cannot genuinely locate a segment's frames inside Video 2, report NO match for it. An honest "no match" is correct; an echoed timestamp is a critical failure.
+- The segments' positions in Video 1 are withheld on purpose. Do NOT try to reconstruct them (e.g. by laying the durations end to end from 00:00) and do NOT report reconstructed positions as chunk timestamps. chunk_start/chunk_end MUST be read off Video 2's own clock by actually locating the frames there.
+- If your matches place segment after segment back-to-back in cumulative duration order starting near 00:00, you have reconstructed the short's timeline instead of watching Video 2 — the server detects this pattern and DISCARDS the whole answer. STOP and re-examine Video 2 frame by frame.
+- Claiming "the entire short matches this chunk cut-for-cut, every segment in order" requires the strongest possible evidence: for EACH segment your "evidence" field must cite a concrete visual fingerprint you saw in VIDEO 2 at that exact position (a background object, on-screen text, an extra's position), AND that position must be consistent with your chunk_inventory. Generic evidence like "same scene, same actors" is NOT acceptable for such a claim.
+- If you cannot genuinely locate a segment's frames inside Video 2, report NO match for it. An honest "no match" is correct; an invented timestamp is a critical failure.
 
 CRITICAL WARNINGS (false positives must be ELIMINATED):
 - YOUR DEFAULT ANSWER FOR EVERY SEGMENT IS "NO MATCH". A segment moves to "segment_matches" ONLY when frame evidence forensically compels you — never because it "probably" matches or "looks right".
@@ -379,6 +386,10 @@ All timestamps in mm:ss.mmm (millisecond precision).
 
 Output strict JSON only, nothing else:
 {
+  "chunk_inventory": [
+    "00:00.000-00:14.200 — what actually happens in this part of the chunk",
+    "00:14.200-00:31.500 — ..."
+  ],
   "match": true,
   "confidence": 0,
   "matched_segments": "S1, S3",
@@ -405,8 +416,9 @@ Output strict JSON only, nothing else:
 }
 
 Rules:
+- "chunk_inventory" is REQUIRED and must describe Video 2 only, from its own clock. Matches inconsistent with the inventory are treated as fabricated.
 - NEVER answer with the whole minute (e.g. chunk range 00:00-01:00). Every match MUST be an individual entry in "segment_matches" with its own exact-duration chunk_start/chunk_end. A match without a per-segment exact-duration window will be DISCARDED by the server.
-- The server compares your chunk_start/chunk_end values against the segment list. If most of your matches simply repeat the segments' own short-video timestamps, the entire answer is treated as an echo and DISCARDED. chunk timestamps must come from Video 2's timeline, found by real frame comparison.
+- The server knows where every segment sits in the short video and compares your chunk_start/chunk_end values against those positions. If your matches reproduce the short's own timeline (identity or back-to-back cumulative placement), the entire answer is treated as an echo and DISCARDED, and the chunk is rescanned by a different model. chunk timestamps must come from Video 2's timeline, found by real frame comparison.
 - "segment_matches" contains ONLY segments that passed all six tests with confidence >= 90.
 - Each segment_matches entry MUST be an exact frame-mapped window: (chunk_end - chunk_start) MUST equal that segment's duration_seconds (adjusted only for a verified speed change). The server measures this and rejects any window that fails.
 - "rejected_lookalikes" must list any similar-looking footage you found and WHY you rejected it — this proves you checked properly.
@@ -560,30 +572,23 @@ export async function segmentShortRequest(
   }
 }
 
-/** Render saved segments as prompt text — forensic JSON when available, legacy lines otherwise. */
+/** Render saved segments as prompt text — forensic JSON when available, legacy lines otherwise.
+ * DELIBERATELY OMITS the segments' short-video timestamps: models were caught copying ("echoing")
+ * those timestamps into chunk_start/chunk_end instead of actually locating frames in the chunk.
+ * With only id + duration + description available, echoing positions is physically impossible. */
 export function segmentsToPromptText(segments: ShortSegment[]): string {
-  const fmt = (sec: number) => {
-    const m = Math.floor(sec / 60)
-    const s = sec - m * 60
-    return `${String(m).padStart(2, '0')}:${s.toFixed(3).padStart(6, '0')}`
-  }
   const hasForensic = segments.some((s) => s.forensic)
-  // Scene-change map: exact cut boundaries + exact duration of every segment.
-  // This table is attached to EVERY one-minute movie chunk request.
-  const sceneMap = segments
-    .map(
-      (s) =>
-        `S${s.index}: scene change at ${fmt(s.start)} → next scene change at ${fmt(s.end)} — EXACT duration ${(s.end - s.start).toFixed(3)}s`,
-    )
+  // Duration table: exact duration of every segment, listed in the order they appear in the short.
+  // NO positions given — chunk timestamps must be read off the chunk's own clock.
+  const durationTable = segments
+    .map((s) => `S${s.index}: EXACT duration ${(s.end - s.start).toFixed(3)}s (segment starts and ends exactly at a hard cut)`)
     .join('\n')
-  const mapBlock = `SCENE CHANGE MAP OF THE SHORT VIDEO (authoritative — a cut happens exactly at each boundary):\n${sceneMap}`
+  const mapBlock = `SEGMENT DURATION TABLE (segments are listed in the order they appear in the short video; their positions in the short are withheld on purpose — you must find each one inside the chunk by its FRAMES, and report where it sits on the CHUNK's own timeline):\n${durationTable}`
   if (hasForensic) {
     const json = JSON.stringify(
       {
         segments: segments.map((s) => ({
           id: `S${s.index}`,
-          start: fmt(s.start),
-          end: fmt(s.end),
           duration_seconds: Number((s.end - s.start).toFixed(3)),
           ...(s.forensic || { description: s.description }),
         })),
@@ -593,7 +598,7 @@ export function segmentsToPromptText(segments: ShortSegment[]): string {
     )
     return `${mapBlock}\n\n${json}`
   }
-  return `${mapBlock}\n\n${segments.map((s) => `S${s.index}: ${fmt(s.start)}-${fmt(s.end)} — ${s.description}`).join('\n')}`
+  return `${mapBlock}\n\n${segments.map((s) => `S${s.index} (${(s.end - s.start).toFixed(3)}s): ${s.description}`).join('\n')}`
 }
 
 /** Main scan request: short video + one movie chunk at 24 fps, default media resolution.
