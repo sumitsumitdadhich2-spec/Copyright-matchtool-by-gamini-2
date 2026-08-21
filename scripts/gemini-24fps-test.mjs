@@ -7,23 +7,36 @@ const settings = JSON.parse(fs.readFileSync('/vercel/share/v0-project/data/setti
 const keys = [settings.apiKey, settings.apiKey2, settings.apiKey3].filter(Boolean)
 const videoBytes = fs.readFileSync('/tmp/gemini-test/chunk-1min.mp4').toString('base64')
 
-const PROMPT = `You are analyzing a 60-second video clip sampled at 24 frames per second.
+const PROMPT = `You are analyzing a video clip. Read ALL of the following context carefully before answering.
 
-TASK: Describe EXACTLY what is visible at these three specific timestamps in this clip:
-1. 00:10 (10 seconds)
-2. 00:30 (30 seconds)
-3. 00:50 (50 seconds)
+=== VIDEO SPECIFICATIONS (ground truth, do not question these) ===
+- Total duration: EXACTLY 60 seconds (one minute). The clip starts at 00:00 and ends at 01:00.
+- Frame rate: 24 frames per second. You are receiving 24 frames for every 1 second of video.
+- Therefore frame number N corresponds to timestamp N/24 seconds. Example: frame 240 = 00:10, frame 720 = 00:30, frame 1200 = 00:50.
+
+=== TIMESTAMP FORMAT RULES (follow strictly) ===
+- Format: MM:SS where MM = minutes, SS = seconds.
+- SS (seconds) can ONLY be 00 to 59. A value like "34:70" is INVALID and must never appear.
+- Because the clip is only 60 seconds long, every timestamp you output MUST be between 00:00 and 01:00. Anything like "02:40" or "24:20" is impossible and wrong.
+- If you are unsure of an exact second, say "approximately" - never invent precision you do not have.
+
+=== TASK ===
+Describe EXACTLY what is visible at these three specific timestamps:
+1. 00:10 (= 10 seconds in = frame 240 of 1440)
+2. 00:30 (= 30 seconds in = frame 720 of 1440)
+3. 00:50 (= 50 seconds in = frame 1200 of 1440)
 
 For each timestamp, describe:
 - Who is on screen (people, their appearance, clothing)
 - What they are doing (action/pose)
 - Camera framing (close-up / medium / wide)
-- Any visible on-screen text or subtitles
+- The EXACT subtitle text visible at that precise moment (if any). Do not report a subtitle from a nearby moment - only the one visible AT that timestamp.
 - Location/background
 
-Then give a brief scene-by-scene timeline of the full 60 seconds with start/end timestamps (MM:SS).
+=== TIMELINE ===
+Then give a scene-by-scene timeline of the full 60 seconds. Every start/end timestamp must be within 00:00 - 01:00 and use valid MM:SS format.
 
-Be precise. Only describe what is actually visible at those exact moments.`
+Before you output your answer, re-check every timestamp against the rules above. Only describe what is actually visible at those exact moments.`
 
 const MODELS = ['gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']
 
