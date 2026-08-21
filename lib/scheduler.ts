@@ -900,6 +900,13 @@ class Scheduler {
         // Release the in-flight key BEFORE follow-up enqueues (they dedupe by key).
         job.verifyInFlight.delete(tKey)
 
+        // FIRST CONFIRM WINS: another candidate got confirmed while this rescan ran —
+        // discard this result entirely, the hunt for this segment is over.
+        if (sm.verification.state === 'confirmed') {
+          addLog(scan, 'info', `re-scan S${sm.segmentIndex} (chunk ${targetChunk}): result discarded — segment already CONFIRMED at 24fps`)
+          return true
+        }
+
         const enforced = enforceSegmentDurations(result, [seg])
         for (const d of enforced.dropped) addLog(scan, 'warn', `re-scan S${sm.segmentIndex}: ${d.slice(0, 160)}`)
         let best = enforced.valid.filter((v) => v.confidence >= CONFIDENCE_THRESHOLD).sort((a, b) => b.confidence - a.confidence)[0]
@@ -963,8 +970,8 @@ class Scheduler {
       // Roll the segment back to a queueable state — verification must NEVER block the scan.
       sm.verification.state = task.kind === 'rescan' ? 'rescanning' : 'pending'
       // Release the in-flight lock BEFORE re-enqueueing — enqueueVerify silently
-      // drops segments that are still marked in-flight, which would lose the retry.
-      job.verifyInFlight.delete(task.segmentIndex)
+      // drops tasks that are still marked in-flight, which would lose the retry.
+      job.verifyInFlight.delete(tKey)
       if (e.kind === 'rpd' || e.kind === 'unavailable') {
         setModelExhausted(m.id, lane.apiKey, m.rpd)
         st.state = 'exhausted'
@@ -992,7 +999,7 @@ class Scheduler {
       }
       return true
     } finally {
-      job.verifyInFlight.delete(task.segmentIndex)
+      job.verifyInFlight.delete(tKey)
       for (const name of remoteNames) void deleteFileQuiet(lane.ai, name)
       for (const f of tmpFiles) {
         try {
@@ -1036,6 +1043,166 @@ class Scheduler {
     return true
   }
 
+  /** Record that a chunk produced a candidate window for this segment (best confidence
+   *  per chunk). This is the memory the confidence-ordered rescan hunt runs on: when
+   *  every candidate is rejected, rescans start with the HIGHEST-confidence chunk first. */
+  private recordCandidateChunk(sm: SegmentMatch, chunkIndex: number, confidence: number) {
+    if (!sm.candidateChunks) sm.candidateChunks = []
+    const existing = sm.candidateChunks.find((c) => c.chunkIndex === chunkIndex)
+    if (existing) existing.confidence = Math.max(existing.confidence, confidence)
+    else sm.candidateChunks.push({ chunkIndex, confidence })
+  }
+
+  /** Is this window (movie seconds) already finally rejected for this segment? */
+  private isWindowRejected(sm: SegmentMatch, start: number, end: number): boolean {
+    return (sm.rejectedWindows || []).some((w) => Math.abs(w[0] - start) <= 0.25 && Math.abs(w[1] - end) <= 0.25)
+  }
+
+  /** Promote the best non-rejected alternate window to primary and queue it for
+   *  24fps verification. Returns false when no usable alternate is left. */
+  private promoteBestAlternate(job: Job, sm: SegmentMatch): boolean {
+    const alts = (sm.alternates || []).filter((a) => !this.isWindowRejected(sm, a.movieStart, a.movieEnd))
+    if (alts.length === 0) return false
+    const best = alts.sort((a, b) => b.confidence - a.confidence)[0]
+    sm.alternates = (sm.alternates || []).filter((a) => a !== best)
+    sm.shortStart = best.shortStart
+    sm.shortEnd = best.shortEnd
+    sm.movieStart = best.movieStart
+    sm.movieEnd = best.movieEnd
+    sm.confidence = best.confidence
+    sm.speed = best.speed
+    sm.model = best.model
+    sm.chunkIndex = best.chunkIndex
+    if (!sm.verification) sm.verification = { state: 'pending', attempts: 0 }
+    else sm.verification.state = 'pending'
+    this.enqueueVerify(job, sm.segmentIndex, 'verify')
+    addLog(
+      job.scan,
+      'info',
+      `S${sm.segmentIndex}: promoting NEXT candidate ${fmt(best.movieStart)}-${fmt(best.movieEnd)} conf ${best.confidence} (from chunk ${best.chunkIndex}) for 24fps verification`,
+    )
+    this.mark(job)
+    return true
+  }
+
+  /** FIRST CONFIRM WINS: the moment one candidate window is frame-confirmed, every
+   *  other candidate, queued verify and queued/planned rescan for this segment is
+   *  cancelled instantly. In-flight tasks self-discard via the confirmed guards. */
+  private onSegmentConfirmed(job: Job, sm: SegmentMatch) {
+    const droppedAlts = (sm.alternates || []).length
+    const droppedRescans = (sm.rescanChunkQueue || []).length
+    sm.alternates = []
+    sm.rescanChunkQueue = []
+    const before = job.verifyQueue.length
+    job.verifyQueue = job.verifyQueue.filter((t) => t.segmentIndex !== sm.segmentIndex)
+    const removedTasks = before - job.verifyQueue.length
+    if (droppedAlts + droppedRescans + removedTasks > 0) {
+      addLog(
+        job.scan,
+        'info',
+        `S${sm.segmentIndex}: first CONFIRM wins — cancelled ${removedTasks} queued task(s), dropped ${droppedAlts} alternate(s) and ${droppedRescans} planned rescan(s)`,
+      )
+    }
+    this.mark(job)
+  }
+
+  /** One verify per candidate window. Called when the 24fps verifier REJECTS the
+   *  segment's current window:
+   *  1) record the window as rejected (never retried),
+   *  2) promote the NEXT candidate (any chunk — duplicates across chunks are expected,
+   *     e.g. flashbacks/recaps; the verifier decides which one is real, never assumption),
+   *  3) when NO candidate is left, start the confidence-ordered rescan hunt over every
+   *     chunk that ever produced a candidate (highest scan confidence first),
+   *  4) when even that is exhausted, finalize as rejected_final. */
+  private onWindowRejected(job: Job, sm: SegmentMatch, reason: string) {
+    const { scan } = job
+    if (!sm.rejectedWindows) sm.rejectedWindows = []
+    if (!this.isWindowRejected(sm, sm.movieStart, sm.movieEnd)) {
+      sm.rejectedWindows.push([sm.movieStart, sm.movieEnd])
+    }
+    addLog(
+      scan,
+      'warn',
+      `S${sm.segmentIndex} REJECTED @24fps: window ${fmt(sm.movieStart)}-${fmt(sm.movieEnd)} (chunk ${sm.chunkIndex}) — ${reason.slice(0, 140)}`,
+    )
+    this.mark(job)
+
+    // 1) Next candidate first — verified one at a time, confidence order.
+    if (this.promoteBestAlternate(job, sm)) return
+
+    // 2) Rescans for this segment still queued/in flight? They may deliver the next
+    //    candidate any moment — stay in "rescanning" and let their results drive us.
+    if (this.hasRescanWork(job, sm.segmentIndex)) {
+      sm.verification!.state = 'rescanning'
+      this.mark(job)
+      return
+    }
+
+    // 3) All candidates rejected → build the rescan queue ONCE from the recorded
+    //    candidate chunks, highest scan confidence first (that chunk is rescanned first).
+    if (sm.rescanChunkQueue === undefined) {
+      sm.rescanChunkQueue = (sm.candidateChunks || [])
+        .slice()
+        .sort((a, b) => b.confidence - a.confidence)
+        .map((c) => c.chunkIndex)
+      if (sm.rescanChunkQueue.length > 0) {
+        addLog(
+          scan,
+          'warn',
+          `S${sm.segmentIndex}: ALL candidates rejected — starting 24fps re-scan hunt in confidence order: chunk(s) ${sm.rescanChunkQueue.join(', ')}`,
+        )
+      }
+    }
+    sm.verification!.state = 'rescanning'
+    if (!this.startNextRescan(job, sm)) this.maybeFinalizeAfterRescans(job, sm)
+  }
+
+  /** Queue the NEXT chunk rescan for this segment (confidence order). Never waits for
+   *  a pending verification verdict — the hunt keeps moving in parallel.
+   *  Returns false when the rescan queue is empty (or the segment is settled). */
+  private startNextRescan(job: Job, sm: SegmentMatch): boolean {
+    const v = sm.verification
+    if (!v || v.state === 'confirmed' || v.state === 'rejected_final') return false
+    if (!sm.rescanChunkQueue || sm.rescanChunkQueue.length === 0) return false
+    const chunk = sm.rescanChunkQueue.shift()!
+    // Keep a pending/verifying state intact — a verify of a promoted window may be
+    // running in parallel with this rescan on the other API key.
+    if (v.state !== 'pending' && v.state !== 'verifying') v.state = 'rescanning'
+    this.enqueueVerify(job, sm.segmentIndex, 'rescan', chunk)
+    this.mark(job)
+    return true
+  }
+
+  /** Called when a rescan finishes and no further rescan could be started. Decides
+   *  whether the segment is truly finished: only when NO verify is pending/in flight,
+   *  NO rescan is queued/in flight, and NO candidate is left does the segment become
+   *  rejected_final (per policy: all candidates rejected + all rescans failed). */
+  private maybeFinalizeAfterRescans(job: Job, sm: SegmentMatch) {
+    const { scan } = job
+    const v = sm.verification
+    if (!v || v.state === 'confirmed' || v.state === 'rejected_final') return
+    // A promoted window is still being verified — its verdict drives the next step.
+    if (v.state === 'pending' || v.state === 'verifying') return
+    if (this.hasRescanWork(job, sm.segmentIndex)) return
+    if ((sm.rescanChunkQueue || []).length > 0) {
+      this.startNextRescan(job, sm)
+      return
+    }
+    // A parallel rescan may have parked a candidate as an alternate — verify it now.
+    if (this.promoteBestAlternate(job, sm)) return
+
+    // Exhausted: every candidate rejected AND every candidate-chunk rescan failed.
+    v.state = 'rejected_final'
+    addLog(
+      scan,
+      'error',
+      `S${sm.segmentIndex} REJECTED_FINAL — every candidate window rejected and every candidate-chunk 24fps re-scan found no same-to-same footage`,
+    )
+    this.mark(job)
+    // Safety net: re-queue chunks that skipped this segment while it was locked.
+    this.onSegmentRejectedFinal(job, sm)
+  }
+
   /** Called whenever the verifier FINALLY rejects a segment's current window.
    *  1) Records the rejected window so it is never retried.
    *  2) Promotes the best saved alternate window (from another chunk) for verification.
@@ -1064,7 +1231,7 @@ class Scheduler {
       sm.model = best.model
       sm.chunkIndex = best.chunkIndex
       sm.verification = { state: 'pending', attempts: 0 }
-      job.verifyInFlight.delete(sm.segmentIndex)
+      job.verifyInFlight.delete(`v:${sm.segmentIndex}`)
       this.enqueueVerify(job, sm.segmentIndex, 'verify')
       addLog(
         scan,
