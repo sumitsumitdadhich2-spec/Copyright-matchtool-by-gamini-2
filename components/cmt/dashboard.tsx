@@ -10,6 +10,7 @@ import { UploadPanel } from './upload-panel'
 import { ScanTimeline } from './scan-timeline'
 import { ModelBoard } from './model-board'
 import { CandidatesPanel } from './candidates-panel'
+import { ChunkResultsPanel } from './chunk-results-panel'
 import { LogsPanel } from './logs-panel'
 import { ReportPanel } from './report-panel'
 import { ComparePanel } from './compare-panel'
@@ -126,6 +127,7 @@ export function Dashboard() {
           {scan && scan.report && <ReportPanel scan={scan} />}
           {scan && (scan.regions.length > 0 || (scan.segmentMatches?.length ?? 0) > 0) && <ComparePanel scan={scan} />}
           {scan && <CandidatesPanel scan={scan} />}
+          {scan && <ChunkResultsPanel scan={scan} />}
           {scan && <LogsPanel scan={scan} />}
         </div>
         <div className="flex flex-col gap-4">

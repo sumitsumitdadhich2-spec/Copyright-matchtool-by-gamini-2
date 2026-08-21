@@ -301,19 +301,25 @@ Rules:
 - Write descriptions so specific that a different take of the same scene (same actors, same location, different moment) would FAIL to match them.
 - NO TWO SEGMENTS may have interchangeable descriptions. If two of your descriptions could be swapped without anyone noticing, they are BOTH too vague — rewrite them with the exact dialogue words, gestures, and frame details that tell them apart.`
 
-const SCAN_PROMPT_BASE = `This is a copyright match tool. You are given TWO videos.
+const SCAN_PROMPT_BASE = `You are a forensic video analyst for a copyright match tool. You are given TWO videos.
 Video 1 is a SHORT VIDEO (the clip we are trying to locate).
 Video 2 is a ONE-MINUTE CHUNK taken from a full movie.
 
-Does any part of the short video appear in this movie chunk? Compare the actual visual content (scenes, people, actions, camera shots) and audio.
+Does any part of the short video appear in this movie chunk as the EXACT SAME RECORDING (same take, frame for frame)? Compare the actual frames: scenes, people, poses, actions, camera shots, background details, and audio (same dialogue words at the same offsets).
+
+YOUR DEFAULT ANSWER IS "NO MATCH". Report a match ONLY when frame-level evidence compels you:
+- Same actors / same location / similar framing is NOT a match — movies are full of similar-looking moments and alternate takes. A different moment of the same scene must be reported as NO match.
+- Never guess or answer from overall plot similarity. If you cannot point to identical start frames, identical end frames, and identical action timing, it is NOT a match.
+- The time ranges you report must be read off each video's OWN timeline by actually locating the frames — never invented, never copied from one video to the other.
+- A false positive is far worse than a miss. When in doubt: {"match": false}.
 
 Answer in strict JSON, nothing else:
-{"match": true or false, "confidence": 0-100, "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "matched_segments": "e.g. S1, S3 or empty", "note": "one short sentence"}
+{"match": true or false, "confidence": 0-100, "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "matched_segments": "e.g. S1, S3 or empty", "note": "one short sentence citing concrete frame evidence"}
 
 Rules:
-- "confidence" is how certain you are the SAME footage appears in both.
+- "confidence" is how certain you are the SAME footage (same recording) appears in both. 90+ only with frame-level certainty; below 90 report {"match": false}.
 - "short_segment" = the time range WITHIN the short video that matches.
-- "chunk_segment" = the time range WITHIN this movie chunk where it appears.
+- "chunk_segment" = the time range WITHIN this movie chunk where it appears — and its duration must equal the short_segment's duration (same footage = same length, unless visibly speed-changed).
 - "matched_segments" = which of the listed short-video segments (by id) appear in this chunk.
 - If no match: {"match": false, "confidence": 0, "short_segment": "", "chunk_segment": "", "matched_segments": "", "note": "..."}`
 
@@ -416,14 +422,16 @@ If the flag was correct, these two clips are the SAME footage playing in paralle
 YOUR STANCE: the flagged match is FALSE until proven true. Your job is to DISPROVE it; finding even ONE frame-level difference (pose, timing, background object, dialogue word) proves it is not the same recording.
 
 METHOD (strict):
+0. FIRST, watch each clip SEPARATELY and note what you actually see in each (first frame, last frame, timed actions). Only then compare. If your two independent observations describe different content, the match is FALSE — reject immediately.
 1. Compare the FIRST frames of both clips — same shot, same pose, same background object positions.
 2. Compare the LAST frames of both clips the same way.
-3. Step through the clips in parallel — every action, cut, and camera move must happen at the SAME time offset in both (within ~2 frames).
-4. Verify at least TWO unique fingerprints (background object positions, on-screen text, extras, reflections) present in BOTH clips at the same moment.
-5. If audio exists: the same dialogue words, music and effects must occur at the same offsets.
+3. Step through the clips in parallel — every action, cut, and camera move must happen at the SAME time offset in both (within ~2 frames). Any drift, missing action, or reordering = reject.
+4. Verify at least THREE unique fingerprints (background object positions, on-screen text, extras, reflections, prop orientations) present in BOTH clips at the same moment. Generic similarity (same actor, same room, same costume) is NOT a fingerprint.
+5. If audio exists: the same dialogue words, music and effects must occur at the same offsets. Different or shifted dialogue = reject.
 6. Aspect ratios may differ (the short may be cropped for vertical format) and colors may be graded/filtered — that is acceptable. Different takes, different moments, or different scenes are NOT.
+7. ACTIVELY HUNT for differences (hand positions, background extras, cut timings, dialogue timing). Finding even ONE real frame-level difference proves it is NOT the same recording.
 
-CONFIDENCE (strict): 90+ ONLY if this is verifiably the same recording frame for frame AND every check above passed. Below 90 = reject. A false positive is far worse than a miss — when in doubt, reject.
+CONFIDENCE (ultra-strict): 97+ ONLY if this is verifiably the same recording frame for frame AND every check above passed AND your difference hunt came up empty. Anything below 97 = reject; if you cannot honestly give 97+, doubt remains. A false positive is far worse than a miss — when in doubt, reject.
 
 WARNING: The scan that flagged this match may itself have been WRONG (models sometimes echo timestamps without comparing frames). Do NOT assume the clips match just because they were flagged. Your job is to independently DISPROVE the match; only confirm it if the first-frame, last-frame, and parallel-timeline checks genuinely pass. In your "note", cite one concrete visual detail you verified in BOTH clips.
 
@@ -649,22 +657,35 @@ YOUR STANCE: the claim is GUILTY OF BEING FALSE until proven true. Earlier scan 
 
 If the claim were true, these clips are the SAME recording playing in parallel: frame 1 of Video 1 corresponds to frame 1 of Video 2, and every action, cut and camera move happens at the same time offset in both.
 
-RUN ALL SIX TESTS — each MUST get an explicit pass/fail verdict in your output:
+PHASE 0 — INDEPENDENT OBSERVATION (MANDATORY, do this BEFORE any comparison):
+Watch each clip SEPARATELY and write down what you ACTUALLY SEE — do not look at the other clip yet:
+- "video1_observation": describe Video 1's first frame, last frame, and every visible action with its time offset (e.g. "0.0s wide shot, man at left edge holding red cup; 0.4s he turns head right; 1.1s cut to close-up...").
+- "video2_observation": the same, written independently for Video 2.
+These observations are your evidence log. The server reads them: an empty, generic, or copy-pasted observation invalidates your whole answer. If your two observations describe different content but you still say CONFIRM, that is an automatic critical failure.
+
+PHASE 1 — EVENT SYNC MAP (MANDATORY):
+From your observations, build "event_map": at least THREE distinct micro-events (a gesture, a blink, a cut, a camera move, an object entering frame) with the time offset at which each occurs in Video 1 AND in Video 2. For the same recording these offsets align within ~2 frames (0.083s). Any event that exists in one clip but not the other, or occurs at a drifting offset, is PROOF of a false match — REJECT immediately and name it in "reason".
+
+PHASE 2 — RUN ALL SIX TESTS — each MUST get an explicit pass/fail verdict in your output:
 1. FIRST FRAME TEST ("first_frame"): freeze the very first frame of BOTH clips. Same shot type, same subject pose (limb positions, head direction, eye line), same background object positions, same lighting direction. A pose offset of even a few frames = fail.
 2. LAST FRAME TEST ("last_frame"): freeze the very last frame of BOTH clips the same way. If one clip ends mid-action where the other has already finished the action = fail.
 3. PARALLEL TIMELINE TEST ("parallel_timeline"): step through both clips together at 24 fps. EVERY movement, gesture, blink, cut and camera move must occur at the SAME offset (within ~2 frames) in both. Any timing drift, missing action, extra action, or reordering = fail.
-4. FINGERPRINT TEST ("fingerprints"): find at least TWO unique, hard-to-fake visual details present in BOTH clips at the SAME moment — e.g. a specific background object and its exact position, on-screen text, an extra passing behind, a smoke/dust shape, a reflection, a prop orientation. Generic similarities (same actor, same room, same costume) are NOT fingerprints. Fewer than two verified fingerprints = fail.
+4. FINGERPRINT TEST ("fingerprints"): find at least THREE unique, hard-to-fake visual details present in BOTH clips at the SAME moment — e.g. a specific background object and its exact position, on-screen text, an extra passing behind, a smoke/dust shape, a reflection, a prop orientation. Generic similarities (same actor, same room, same costume, same lighting) are NOT fingerprints and will be discarded by the server. Fewer than three verified concrete fingerprints = fail.
 5. AUDIO TEST ("audio"): if both clips have audio — the same dialogue words, music beats and sound effects must occur at the same offsets. Different or shifted dialogue = fail. If either clip has no usable audio, report "na".
 6. ACCEPTABLE DIFFERENCES: aspect-ratio crops (vertical reframing), letterboxing, resolution loss, compression artifacts and color grading/filters are acceptable and must NOT cause a fail on their own. Different takes, different moments of the same scene, or different scenes are NEVER acceptable.
+
+PHASE 3 — ACTIVE DIFFERENCE HUNT (MANDATORY):
+Before you are allowed to CONFIRM, you must actively hunt for differences and report the result in "difference_hunt": list every candidate difference you checked (hand positions, background extras, cut timings, object placements, dialogue timing) and why each turned out NOT to be a difference. An honest hunt that finds even ONE real difference = REJECT. If you cannot list at least three checked candidates, you have not hunted — REJECT.
 
 TRAPS THAT HAVE FOOLED VERIFIERS BEFORE (check each explicitly):
 - SAME SCENE, DIFFERENT MOMENT: the movie shows this location/conversation for minutes; the claimed window is from the wrong part. The first/last frame tests catch this — do them literally, not from memory.
 - DIFFERENT TAKE: same actors, same blocking, nearly identical — but a hand position, background extra, or cut timing differs. Hunt for such micro-differences; finding ONE proves it is not the same recording.
 - REPEATED FOOTAGE (flashback/recap): visually identical footage CAN legitimately appear — confirm only if every test passes for THIS window.
 - ECHOED TIMESTAMPS: the scan may have copied timestamps without comparing frames. Never assume the clips are aligned; verify alignment yourself from frame 1.
+- CONFIRMATION BIAS: you were TOLD these clips should match. Ignore that. Treat them as two random clips until your own frame evidence says otherwise.
 
-VERDICT RULES (strict):
-- "CONFIRM" ONLY if ALL applicable tests pass ("audio" may be "na") AND you verified at least TWO concrete fingerprints AND you genuinely could not find a single frame-level difference. Confidence 90-100.
+VERDICT RULES (ultra-strict):
+- "CONFIRM" ONLY if: ALL applicable tests pass ("audio" may be "na") AND at least THREE concrete fingerprints verified AND the event map aligns within 2 frames AND your difference hunt came up empty. Confidence for a CONFIRM must be 97-100 — if you cannot honestly give 97+, it means doubt remains, so REJECT.
 - ANY failed test, ANY unverifiable test, ANY doubt → "REJECT". Confidence reflects how sure you are of the rejection.
 - On REJECT, "reason" MUST spell out exactly WHAT is visually different and WHERE: scene, subjects, clothing, motion, timing offset, camera angle, background objects, on-screen text. Never vague — the user reads it.
 - NEVER confirm based on plot, actors, location or overall similarity. Only frame-level identity counts.
@@ -673,6 +694,11 @@ Answer in strict JSON, nothing else:
 {
   "verdict": "CONFIRM" or "REJECT",
   "confidence": 0-100,
+  "video1_observation": "first frame, last frame, and timed action list of Video 1 as you actually saw it",
+  "video2_observation": "first frame, last frame, and timed action list of Video 2 as you actually saw it",
+  "event_map": [
+    {"event": "micro-event description", "v1_offset": "s.mmm", "v2_offset": "s.mmm"}
+  ],
   "checks": {
     "first_frame": "pass" or "fail",
     "last_frame": "pass" or "fail",
@@ -680,7 +706,8 @@ Answer in strict JSON, nothing else:
     "fingerprints": "pass" or "fail",
     "audio": "pass" or "fail" or "na"
   },
-  "fingerprints_verified": ["concrete detail 1 seen in BOTH clips at the same moment", "concrete detail 2"],
+  "fingerprints_verified": ["concrete detail 1 seen in BOTH clips at the same moment", "concrete detail 2", "concrete detail 3"],
+  "difference_hunt": ["candidate difference checked and its outcome", "...at least 3 entries..."],
   "reason": "detailed visual reason (mandatory on REJECT, empty string on CONFIRM)",
   "note": "one-line summary citing the strongest single piece of evidence"
 }`
@@ -712,6 +739,10 @@ export async function liveVerifyRequest(
     if (!text) throw new Error('Empty model response')
     interface RawLiveVerify extends Partial<LiveVerifyResult> {
       fingerprints_verified?: unknown
+      video1_observation?: unknown
+      video2_observation?: unknown
+      event_map?: unknown
+      difference_hunt?: unknown
     }
     const parsed = tolerantJsonParse<RawLiveVerify>(extractJsonBlock(text))
     let verdict: 'CONFIRM' | 'REJECT' = String(parsed.verdict || '').toUpperCase() === 'CONFIRM' ? 'CONFIRM' : 'REJECT'
@@ -731,26 +762,73 @@ export async function liveVerifyRequest(
       ? parsed.fingerprints_verified.map((f) => String(f)).filter((f) => f.trim().length > 0)
       : []
 
-    // SERVER-SIDE OVERRIDE — the model's CONFIRM is never trusted blindly:
-    // every mandatory test must be an explicit "pass" and >= 2 concrete fingerprints
-    // must be cited, otherwise the verdict is downgraded to REJECT.
+    // Evidence-log fields the ultra-strict prompt demands (server re-validates all of them).
+    const obs1 = String(parsed.video1_observation || '').trim()
+    const obs2 = String(parsed.video2_observation || '').trim()
+    interface RawEvent {
+      event?: unknown
+      v1_offset?: unknown
+      v2_offset?: unknown
+    }
+    const eventMap: { event: string; v1: number | null; v2: number | null }[] = Array.isArray(parsed.event_map)
+      ? (parsed.event_map as RawEvent[])
+          .filter((e) => e && typeof e === 'object')
+          .map((e) => {
+            const toOff = (v: unknown): number | null => {
+              const s = String(v ?? '').trim()
+              if (!s) return null
+              // accept "s.mmm" plain seconds or "mm:ss.mmm"
+              const plain = Number.parseFloat(s)
+              if (/^\d+(?:\.\d+)?$/.test(s) && Number.isFinite(plain)) return plain
+              const m = s.match(/^(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/)
+              if (!m) return Number.isFinite(plain) ? plain : null
+              return (m[1] ? Number(m[1]) * 3600 : 0) + Number(m[2]) * 60 + Number(m[3])
+            }
+            return { event: String(e.event || ''), v1: toOff(e.v1_offset), v2: toOff(e.v2_offset) }
+          })
+          .filter((e) => e.event.trim().length > 0)
+      : []
+    const diffHunt = Array.isArray(parsed.difference_hunt)
+      ? parsed.difference_hunt.map((d) => String(d)).filter((d) => d.trim().length > 0)
+      : []
+    const confidence = Number(parsed.confidence) || 0
+
+    // SERVER-SIDE OVERRIDE — the model's CONFIRM is NEVER trusted blindly.
+    // Every layer of evidence is re-validated; any weakness downgrades to REJECT:
+    //  1. every mandatory test must be an explicit "pass"
+    //  2. >= 3 concrete fingerprints must be cited
+    //  3. independent observations of BOTH clips must be present and substantial
+    //  4. an event sync map with >= 3 events must be present, offsets aligned within 0.15s
+    //  5. a difference hunt with >= 3 checked candidates must be present
+    //  6. confidence must be >= 97 (a CONFIRM below that means doubt remained)
     if (verdict === 'CONFIRM') {
       const mandatory: (keyof LiveVerifyChecks)[] = ['first_frame', 'last_frame', 'parallel_timeline', 'fingerprints']
       const failed = mandatory.filter((k) => checks[k] !== 'pass')
       if (checks.audio === 'fail') failed.push('audio')
-      const weakFingerprints = fingerprints.length < 2
-      if (failed.length > 0 || weakFingerprints) {
+      const problems: string[] = []
+      if (failed.length > 0) problems.push(`test(s) not explicitly passed: ${failed.join(', ')}`)
+      if (fingerprints.length < 3) problems.push(`only ${fingerprints.length} concrete fingerprint(s) cited (3 required)`)
+      if (obs1.length < 60 || obs2.length < 60)
+        problems.push('independent per-clip observations missing or too thin — no proof the model actually watched both clips')
+      if (obs1.length >= 60 && obs1 === obs2)
+        problems.push('video1/video2 observations are identical text — copy-paste, not independent observation')
+      if (eventMap.length < 3) problems.push(`event sync map has only ${eventMap.length} event(s) (3 required)`)
+      const misaligned = eventMap.filter((e) => e.v1 !== null && e.v2 !== null && Math.abs(e.v1 - e.v2) > 0.15)
+      if (misaligned.length > 0)
+        problems.push(
+          `event map contradicts CONFIRM — misaligned event(s): ${misaligned.map((e) => `"${e.event.slice(0, 40)}" v1@${e.v1}s vs v2@${e.v2}s`).join('; ')}`,
+        )
+      if (diffHunt.length < 3) problems.push(`difference hunt has only ${diffHunt.length} checked candidate(s) (3 required)`)
+      if (confidence < 97) problems.push(`confidence ${confidence} < 97 — a CONFIRM with residual doubt is not accepted`)
+      if (problems.length > 0) {
         verdict = 'REJECT'
-        const parts: string[] = []
-        if (failed.length > 0) parts.push(`test(s) not explicitly passed: ${failed.join(', ')}`)
-        if (weakFingerprints) parts.push(`only ${fingerprints.length} concrete fingerprint(s) cited (2 required)`)
-        reason = `SERVER OVERRIDE — model said CONFIRM but ${parts.join('; ')}. ${reason}`.trim()
+        reason = `SERVER OVERRIDE — model said CONFIRM but evidence is insufficient: ${problems.join('; ')}. ${reason}`.trim()
       }
     }
 
     return {
       verdict,
-      confidence: Number(parsed.confidence) || 0,
+      confidence,
       checks,
       fingerprints,
       reason,
