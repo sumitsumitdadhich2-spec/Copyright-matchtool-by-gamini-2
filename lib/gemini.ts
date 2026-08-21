@@ -258,7 +258,26 @@ export function parseModelJSON(text: string): ChunkScanResult {
 
 const SEGMENT_PROMPT = `You are a forensic video analyst working for a Copyright Match Tool. You are given ONE short video that was edited together from clips of a movie.
 
-TASK: Split this short video into its individual scene segments (every cut = new segment), and write a FORENSIC-LEVEL description of each segment. These descriptions will later be used to locate the exact same footage inside the full movie, so they must be detailed enough that the segment can NEVER be confused with a similar-looking scene from the same movie.
+TASK: Detect EVERY hard cut in this short video, split it into its true shot segments (every cut = new segment), and write a FORENSIC-LEVEL description of each segment. These descriptions will later be used to locate the exact same footage inside the full movie, so they must be detailed enough that the segment can NEVER be confused with a similar-looking scene from the same movie.
+
+WHAT A CUT IS (this is the core of your job):
+- A cut is the exact frame boundary where frame N and frame N+1 belong to DIFFERENT shots: the camera position, framing, or scene content changes abruptly between two consecutive frames.
+- Camera movement (pan/zoom/handheld), subject movement, or lighting changes WITHIN one continuous recording are NOT cuts. One continuous take = ONE segment, no matter how long.
+- Gradual transitions (dissolve, fade, wipe) are also boundaries — place the boundary at the midpoint of the transition.
+
+MANDATORY TWO-PASS METHOD:
+- PASS 1 — CUT DETECTION: step through the video frame by frame at 24 fps and write down the exact timestamp of every shot change you actually SEE. Do not estimate, round, or guess. Boundaries land wherever the real cuts are — at irregular timestamps like 00:03.417, 00:07.208, 00:19.625.
+- PASS 2 — DESCRIPTION: only after the full cut list is final, describe each segment using the fields below.
+
+SEGMENT DURATIONS ARE IRREGULAR AND CAN BE TINY:
+- Real edits produce segments of wildly different lengths: one segment may be 12 seconds, the next only 0.3 seconds. Fast-cut montages routinely contain shots of just a few frames (0.083s-0.5s).
+- There is NO minimum segment length. A 2-frame flash shot is still its own segment. NEVER absorb a very short shot into its neighbor and NEVER skip it.
+- NEVER split one continuous shot into multiple segments just to make durations look even.
+
+ABSOLUTE PROHIBITION — DO NOT SLICE BY TIME:
+- You are FORBIDDEN from dividing the video into equal or round-numbered intervals (e.g. every 5 seconds: 0-5, 5-10, 10-15...). That is not segmentation, it is fabrication, and the server automatically detects and REJECTS any output where segments have uniform durations or where boundaries all fall on round whole-second marks.
+- If your draft output shows several segments with identical durations, or boundaries like 05.000 / 10.000 / 15.000, you did NOT watch the video — go back to PASS 1 and find the real cuts.
+- If the video genuinely has no cuts at all, return ONE segment covering the whole video.
 
 Analyze the video at 24 fps precision. All timestamps must be in mm:ss.mmm format (millisecond precision), and segment boundaries must be frame-accurate (aligned to 1/24s = 0.0417s steps).
 
@@ -295,9 +314,10 @@ Output strict JSON only, nothing else:
 }
 
 Rules:
-- Every cut in the video = a new segment. Do not merge two shots into one segment.
+- Every cut in the video = a new segment. Do not merge two shots into one segment, even if the shot is only a few frames long.
 - Segments must be contiguous: each segment's start = previous segment's end.
 - Do NOT skip any part of the video. The last segment must end at the video's total duration.
+- Segment boundaries must come from PASS 1 cut detection — real, observed frame changes. Uniform or round-numbered boundaries will be rejected by the server.
 - Write descriptions so specific that a different take of the same scene (same actors, same location, different moment) would FAIL to match them.
 - NO TWO SEGMENTS may have interchangeable descriptions. If two of your descriptions could be swapped without anyone noticing, they are BOTH too vague — rewrite them with the exact dialogue words, gestures, and frame details that tell them apart.`
 
@@ -495,6 +515,27 @@ function toSecondsMs(t: string): number | null {
   return h * 3600 + min * 60 + sec
 }
 
+/** Detect "lazy" segmentation where the model sliced the video into equal/round intervals
+ *  instead of finding real cuts (e.g. 0-5s, 5-10s, 10-15s...). Real edits virtually never
+ *  produce several segments with identical durations or all boundaries on exact whole seconds. */
+export function looksLikeUniformSlicing(segments: ShortSegment[]): string | null {
+  if (segments.length < 3) return null
+  const durations = segments.map((s) => s.end - s.start)
+  const first = durations[0]
+  // All segments the same length (within ~1 frame) = mechanical slicing, not cut detection.
+  if (durations.every((d) => Math.abs(d - first) < 0.05)) {
+    return `all ${segments.length} segments have identical ${first.toFixed(3)}s durations`
+  }
+  // 5+ segments whose boundaries ALL land on exact whole seconds (x.000) is equally implausible.
+  if (segments.length >= 5) {
+    const bounds = segments.flatMap((s) => [s.start, s.end])
+    if (bounds.every((b) => Math.abs(b - Math.round(b)) < 0.002)) {
+      return `all segment boundaries fall on exact whole seconds — no real cut detection`
+    }
+  }
+  return null
+}
+
 /** One-time segmentation pass: whole short video at 24 fps → movie guess + scene segments. */
 export async function segmentShortRequest(
   ai: GoogleGenAI,
@@ -565,6 +606,8 @@ export async function segmentShortRequest(
       })
     }
     if (segments.length === 0) throw new Error(`Segmentation returned no valid segments: ${text.slice(0, 200)}`)
+    const lazy = looksLikeUniformSlicing(segments)
+    if (lazy) throw new Error(`Segmentation REJECTED (fabricated time-slices, not real cuts): ${lazy}`)
     return { movieGuess: String(parsed.movie_guess || 'uncertain'), segments }
   } catch (err) {
     if (err instanceof GeminiError) throw err
