@@ -30,6 +30,8 @@ export interface ChunkScanResult {
   segment_matches?: RawSegmentMatch[]
   rejected_lookalikes?: RejectedLookalike[]
   note: string
+  /** verbatim model response text (for the per-chunk UI expander) */
+  raw?: string
 }
 
 export interface SegmentationResult {
@@ -342,7 +344,8 @@ METHOD (follow strictly, segment by segment):
    c. TIMELINE TEST: every action in between must unfold with the SAME timing and in the SAME order.
    d. CAMERA TEST: identical shot type, angle, and camera movement at the same moments.
    e. FINGERPRINT TEST: unique background details (object positions, extras, lighting, smoke shapes, on-screen text) must line up.
-4. A match is valid ONLY if ALL five tests pass. This must be the exact same take — the same recording, frame for frame.
+   f. AUDIO TEST: if audio is available, the same dialogue words, music and sound effects must occur at the same offsets in both. Different or shifted dialogue = not the same take.
+4. A match is valid ONLY if ALL six tests pass (audio may be skipped only when no usable audio exists). This must be the exact same take — the same recording, frame for frame.
 5. DURATION CHECK: the matched chunk range must have almost the same duration as the segment. If durations differ, check whether the short clip was slowed down or sped up, and report it in "speed". If durations differ and there is no speed change, it is NOT a valid match.
 
 ANTI-ECHO RULE (violating this invalidates your whole answer):
@@ -353,13 +356,14 @@ ANTI-ECHO RULE (violating this invalidates your whole answer):
 - If you cannot genuinely locate a segment's frames inside Video 2, report NO match for it. An honest "no match" is correct; an echoed timestamp is a critical failure.
 
 CRITICAL WARNINGS (false positives must be ELIMINATED):
+- YOUR DEFAULT ANSWER FOR EVERY SEGMENT IS "NO MATCH". A segment moves to "segment_matches" ONLY when frame evidence forensically compels you — never because it "probably" matches or "looks right".
 - Movies contain many similar-looking scenes: same actors, same location, same costumes, similar framing. These are NOT matches. A different moment or a different take of the same scene must be REJECTED even if it looks 90% similar.
 - Matching only on the description (e.g. "boy runs to bottle" appears in both) is FORBIDDEN. The frames themselves must be identical.
 - Any candidate window whose duration does not equal the segment's exact duration (after accounting for a verified speed change) is a FALSE POSITIVE — put it in "rejected_lookalikes", never in "segment_matches".
 - A false positive is much worse than a miss. When in doubt, leave it out and record it in "rejected_lookalikes" with the reason.
 
 CONFIDENCE SCALE (per segment — STRICT):
-- 95-100: all five tests passed, start and end frames verified identical.
+- 95-100: all six tests passed, start and end frames verified identical.
 - 90-94: same take, minor uncertainty (e.g. compression artifacts).
 - Below 90: DO NOT report the segment at all. It goes in "rejected_lookalikes" instead. The server DISCARDS anything under 90.
 
@@ -395,7 +399,7 @@ Output strict JSON only, nothing else:
 Rules:
 - NEVER answer with the whole minute (e.g. chunk range 00:00-01:00). Every match MUST be an individual entry in "segment_matches" with its own exact-duration chunk_start/chunk_end. A match without a per-segment exact-duration window will be DISCARDED by the server.
 - The server compares your chunk_start/chunk_end values against the segment list. If most of your matches simply repeat the segments' own short-video timestamps, the entire answer is treated as an echo and DISCARDED. chunk timestamps must come from Video 2's timeline, found by real frame comparison.
-- "segment_matches" contains ONLY segments that passed all five tests with confidence >= 90.
+- "segment_matches" contains ONLY segments that passed all six tests with confidence >= 90.
 - Each segment_matches entry MUST be an exact frame-mapped window: (chunk_end - chunk_start) MUST equal that segment's duration_seconds (adjusted only for a verified speed change). The server measures this and rejects any window that fails.
 - "rejected_lookalikes" must list any similar-looking footage you found and WHY you rejected it — this proves you checked properly.
 - "match" is true if at least one segment passed.
@@ -409,13 +413,17 @@ Video 1 is a segment cut from a SHORT VIDEO. Video 2 is a segment cut from a MOV
 
 If the flag was correct, these two clips are the SAME footage playing in parallel: frame 1 of Video 1 corresponds to frame 1 of Video 2, and every action happens at the same offset in both clips.
 
+YOUR STANCE: the flagged match is FALSE until proven true. Your job is to DISPROVE it; finding even ONE frame-level difference (pose, timing, background object, dialogue word) proves it is not the same recording.
+
 METHOD (strict):
 1. Compare the FIRST frames of both clips — same shot, same pose, same background object positions.
 2. Compare the LAST frames of both clips the same way.
-3. Step through the clips in parallel — every action, cut, and camera move must happen at the SAME time offset in both.
-4. Aspect ratios may differ (the short may be cropped for vertical format) and colors may be graded/filtered — that is acceptable. Different takes, different moments, or different scenes are NOT.
+3. Step through the clips in parallel — every action, cut, and camera move must happen at the SAME time offset in both (within ~2 frames).
+4. Verify at least TWO unique fingerprints (background object positions, on-screen text, extras, reflections) present in BOTH clips at the same moment.
+5. If audio exists: the same dialogue words, music and effects must occur at the same offsets.
+6. Aspect ratios may differ (the short may be cropped for vertical format) and colors may be graded/filtered — that is acceptable. Different takes, different moments, or different scenes are NOT.
 
-CONFIDENCE (strict): 90+ ONLY if this is verifiably the same recording frame for frame. Below 90 = reject. A false positive is worse than a miss.
+CONFIDENCE (strict): 90+ ONLY if this is verifiably the same recording frame for frame AND every check above passed. Below 90 = reject. A false positive is far worse than a miss — when in doubt, reject.
 
 WARNING: The scan that flagged this match may itself have been WRONG (models sometimes echo timestamps without comparing frames). Do NOT assume the clips match just because they were flagged. Your job is to independently DISPROVE the match; only confirm it if the first-frame, last-frame, and parallel-timeline checks genuinely pass. In your "note", cite one concrete visual detail you verified in BOTH clips.
 
@@ -442,7 +450,9 @@ async function generate(
     const text = resp.text
     if (!text) throw new Error('Empty model response')
     try {
-      return parseModelJSON(text)
+      const parsed = parseModelJSON(text)
+      parsed.raw = text
+      return parsed
     } catch {
       throw new Error(`Unparseable JSON from model: ${text.slice(0, 200)}`)
     }
@@ -610,34 +620,70 @@ export async function verifyRequest(
 
 // ---------- LIVE per-segment verification (2-key flow) ----------
 
+export interface LiveVerifyChecks {
+  first_frame: string
+  last_frame: string
+  parallel_timeline: string
+  fingerprints: string
+  audio: string
+}
+
 export interface LiveVerifyResult {
   verdict: 'CONFIRM' | 'REJECT'
   confidence: number
+  /** per-test pass/fail results reported by the model (server re-validates these) */
+  checks?: Partial<LiveVerifyChecks>
+  /** concrete fingerprints the model claims to have verified in BOTH clips */
+  fingerprints?: string[]
   /** detailed visual reason — REQUIRED on REJECT (what differs: scene, subjects, motion, timing...) */
   reason: string
   note: string
+  /** verbatim model response text (for the per-chunk UI expander) */
+  raw?: string
 }
 
-const LIVE_VERIFY_PROMPT = `This is a STRICT frame-by-frame copyright verification at 24 fps. You are given TWO short clips:
-Video 1 = a segment cut from a SHORT VIDEO. Video 2 = the window cut from a MOVIE where a scan claims the SAME footage sits.
+const LIVE_VERIFY_PROMPT = `You are the FINAL, INDEPENDENT, ADVERSARIAL VERIFIER of a Copyright Match Tool, doing a frame-by-frame comparison at 24 fps. You are given TWO short clips:
+Video 1 = a segment cut from a SHORT VIDEO. Video 2 = the window cut from a MOVIE where an earlier scan CLAIMS the same footage sits.
 
-If the claim is correct these clips are the SAME recording playing in parallel: frame 1 of Video 1 corresponds to frame 1 of Video 2, and every action, cut and camera move happens at the same offset in both.
+YOUR STANCE: the claim is GUILTY OF BEING FALSE until proven true. Earlier scan models are known to hallucinate matches, echo timestamps without looking at frames, and confuse similar-looking takes. Your ONLY job is to try as hard as possible to DISPROVE the claim. A CONFIRM from you is treated as ground truth by the system and shown to the user as a legal copyright match — a wrong CONFIRM is the worst possible failure. A wrong REJECT merely triggers another search. When ANY doubt remains: REJECT.
 
-METHOD (all mandatory):
-1. FIRST FRAME: compare the very first frames — same shot, same pose, same background object positions.
-2. LAST FRAME: compare the very last frames the same way.
-3. PARALLEL TIMELINE: step through both clips together at 24 fps — every movement must occur at the SAME time offset.
-4. FINGERPRINTS: at least one unique visual detail (background object, on-screen text, an extra, lighting shape) must be present in BOTH clips at the same moment.
-5. Aspect-ratio crops (vertical reframing) and color grading/filters are ACCEPTABLE differences. Different takes, different moments, different scenes, or timing drift are NOT.
+If the claim were true, these clips are the SAME recording playing in parallel: frame 1 of Video 1 corresponds to frame 1 of Video 2, and every action, cut and camera move happens at the same time offset in both.
 
-The scan that produced this claim may be WRONG (models sometimes echo timestamps without comparing frames). Your job is to try to DISPROVE the match. Only CONFIRM when checks 1-4 genuinely pass.
+RUN ALL SIX TESTS — each MUST get an explicit pass/fail verdict in your output:
+1. FIRST FRAME TEST ("first_frame"): freeze the very first frame of BOTH clips. Same shot type, same subject pose (limb positions, head direction, eye line), same background object positions, same lighting direction. A pose offset of even a few frames = fail.
+2. LAST FRAME TEST ("last_frame"): freeze the very last frame of BOTH clips the same way. If one clip ends mid-action where the other has already finished the action = fail.
+3. PARALLEL TIMELINE TEST ("parallel_timeline"): step through both clips together at 24 fps. EVERY movement, gesture, blink, cut and camera move must occur at the SAME offset (within ~2 frames) in both. Any timing drift, missing action, extra action, or reordering = fail.
+4. FINGERPRINT TEST ("fingerprints"): find at least TWO unique, hard-to-fake visual details present in BOTH clips at the SAME moment — e.g. a specific background object and its exact position, on-screen text, an extra passing behind, a smoke/dust shape, a reflection, a prop orientation. Generic similarities (same actor, same room, same costume) are NOT fingerprints. Fewer than two verified fingerprints = fail.
+5. AUDIO TEST ("audio"): if both clips have audio — the same dialogue words, music beats and sound effects must occur at the same offsets. Different or shifted dialogue = fail. If either clip has no usable audio, report "na".
+6. ACCEPTABLE DIFFERENCES: aspect-ratio crops (vertical reframing), letterboxing, resolution loss, compression artifacts and color grading/filters are acceptable and must NOT cause a fail on their own. Different takes, different moments of the same scene, or different scenes are NEVER acceptable.
 
-VERDICT RULES:
-- "CONFIRM" ONLY if this is verifiably the same recording frame for frame (confidence 90-100).
-- Otherwise "REJECT" — and "reason" MUST spell out exactly WHAT is visually different and WHERE: scene, subjects, clothing, motion, timing offset, camera angle, background objects, on-screen text. Never leave the reason vague; the user reads it to judge the rejection.
+TRAPS THAT HAVE FOOLED VERIFIERS BEFORE (check each explicitly):
+- SAME SCENE, DIFFERENT MOMENT: the movie shows this location/conversation for minutes; the claimed window is from the wrong part. The first/last frame tests catch this — do them literally, not from memory.
+- DIFFERENT TAKE: same actors, same blocking, nearly identical — but a hand position, background extra, or cut timing differs. Hunt for such micro-differences; finding ONE proves it is not the same recording.
+- REPEATED FOOTAGE (flashback/recap): visually identical footage CAN legitimately appear — confirm only if every test passes for THIS window.
+- ECHOED TIMESTAMPS: the scan may have copied timestamps without comparing frames. Never assume the clips are aligned; verify alignment yourself from frame 1.
+
+VERDICT RULES (strict):
+- "CONFIRM" ONLY if ALL applicable tests pass ("audio" may be "na") AND you verified at least TWO concrete fingerprints AND you genuinely could not find a single frame-level difference. Confidence 90-100.
+- ANY failed test, ANY unverifiable test, ANY doubt → "REJECT". Confidence reflects how sure you are of the rejection.
+- On REJECT, "reason" MUST spell out exactly WHAT is visually different and WHERE: scene, subjects, clothing, motion, timing offset, camera angle, background objects, on-screen text. Never vague — the user reads it.
+- NEVER confirm based on plot, actors, location or overall similarity. Only frame-level identity counts.
 
 Answer in strict JSON, nothing else:
-{"verdict": "CONFIRM" or "REJECT", "confidence": 0-100, "reason": "detailed visual reason (mandatory on REJECT, empty string on CONFIRM)", "note": "one concrete visual detail you verified or refuted in BOTH clips"}`
+{
+  "verdict": "CONFIRM" or "REJECT",
+  "confidence": 0-100,
+  "checks": {
+    "first_frame": "pass" or "fail",
+    "last_frame": "pass" or "fail",
+    "parallel_timeline": "pass" or "fail",
+    "fingerprints": "pass" or "fail",
+    "audio": "pass" or "fail" or "na"
+  },
+  "fingerprints_verified": ["concrete detail 1 seen in BOTH clips at the same moment", "concrete detail 2"],
+  "reason": "detailed visual reason (mandatory on REJECT, empty string on CONFIRM)",
+  "note": "one-line summary citing the strongest single piece of evidence"
+}`
 
 /** LIVE verification: matched short clip vs matched movie window at 24 fps, one request.
  *  Combined duration is always < 30s so default resolution fits the TPM cap. */
@@ -664,13 +710,52 @@ export async function liveVerifyRequest(
     })
     const text = resp.text
     if (!text) throw new Error('Empty model response')
-    const parsed = tolerantJsonParse<Partial<LiveVerifyResult>>(extractJsonBlock(text))
-    const verdict = String(parsed.verdict || '').toUpperCase() === 'CONFIRM' ? 'CONFIRM' : 'REJECT'
+    interface RawLiveVerify extends Partial<LiveVerifyResult> {
+      fingerprints_verified?: unknown
+    }
+    const parsed = tolerantJsonParse<RawLiveVerify>(extractJsonBlock(text))
+    let verdict: 'CONFIRM' | 'REJECT' = String(parsed.verdict || '').toUpperCase() === 'CONFIRM' ? 'CONFIRM' : 'REJECT'
+    let reason = String(parsed.reason || '')
+
+    // Normalize checks + fingerprints reported by the model.
+    const rawChecks = (parsed.checks && typeof parsed.checks === 'object' ? parsed.checks : {}) as Record<string, unknown>
+    const norm = (v: unknown) => String(v ?? '').trim().toLowerCase()
+    const checks: Partial<LiveVerifyChecks> = {
+      first_frame: norm(rawChecks.first_frame),
+      last_frame: norm(rawChecks.last_frame),
+      parallel_timeline: norm(rawChecks.parallel_timeline),
+      fingerprints: norm(rawChecks.fingerprints),
+      audio: norm(rawChecks.audio),
+    }
+    const fingerprints = Array.isArray(parsed.fingerprints_verified)
+      ? parsed.fingerprints_verified.map((f) => String(f)).filter((f) => f.trim().length > 0)
+      : []
+
+    // SERVER-SIDE OVERRIDE — the model's CONFIRM is never trusted blindly:
+    // every mandatory test must be an explicit "pass" and >= 2 concrete fingerprints
+    // must be cited, otherwise the verdict is downgraded to REJECT.
+    if (verdict === 'CONFIRM') {
+      const mandatory: (keyof LiveVerifyChecks)[] = ['first_frame', 'last_frame', 'parallel_timeline', 'fingerprints']
+      const failed = mandatory.filter((k) => checks[k] !== 'pass')
+      if (checks.audio === 'fail') failed.push('audio')
+      const weakFingerprints = fingerprints.length < 2
+      if (failed.length > 0 || weakFingerprints) {
+        verdict = 'REJECT'
+        const parts: string[] = []
+        if (failed.length > 0) parts.push(`test(s) not explicitly passed: ${failed.join(', ')}`)
+        if (weakFingerprints) parts.push(`only ${fingerprints.length} concrete fingerprint(s) cited (2 required)`)
+        reason = `SERVER OVERRIDE — model said CONFIRM but ${parts.join('; ')}. ${reason}`.trim()
+      }
+    }
+
     return {
       verdict,
       confidence: Number(parsed.confidence) || 0,
-      reason: String(parsed.reason || ''),
+      checks,
+      fingerprints,
+      reason,
       note: String(parsed.note || ''),
+      raw: text,
     }
   } catch (err) {
     if (err instanceof GeminiError) throw err
@@ -719,8 +804,8 @@ DURATION LOCK: the matched window MUST be EXACTLY ${h.segmentDuration.toFixed(3)
 METHOD (strict):
 1. Memorize Video 1: start frame, end frame, action timeline.
 2. Scan Video 2 completely — do not stop at the first lookalike.
-3. For every candidate window run: START FRAME TEST, END FRAME TEST, TIMELINE TEST, CAMERA TEST, FINGERPRINT TEST (unique background details must line up).
-4. A match is valid ONLY if all five tests pass — the exact same take, frame for frame.
+3. For every candidate window run: START FRAME TEST, END FRAME TEST, TIMELINE TEST, CAMERA TEST, FINGERPRINT TEST (unique background details must line up), AUDIO TEST (same dialogue words/music/effects at the same offsets, when audio exists).
+4. A match is valid ONLY if all six tests pass — the exact same take, frame for frame. Your DEFAULT answer is "no match"; only concrete frame evidence may flip it.
 5. If the correct window is genuinely NOT in this chunk, say so — an honest "no match" is correct. A false positive is much worse than a miss.
 
 CONFIDENCE (strict): 90+ only when all tests pass with frame-level certainty. Below 90 = report no match.

@@ -10,6 +10,31 @@ export interface ChunkState {
    *  locked (conf 100 or 24fps-confirmed) at scan time. If such a segment is later
    *  rejected by the verifier, this chunk is re-queued to search for it. */
   excludedSegments?: number[]
+  /** validated per-segment windows found inside THIS chunk (chunk-relative seconds).
+   *  Drives the live per-minute timeline in the UI. */
+  foundSegments?: ChunkFoundSegment[]
+  /** full raw Gemini outputs produced for this chunk (scan / rescan / verify), oldest first */
+  rawOutputs?: ChunkRawOutput[]
+}
+
+/** One duration-validated segment window found inside a chunk. */
+export interface ChunkFoundSegment {
+  segmentIndex: number
+  /** seconds WITHIN this chunk */
+  chunkStart: number
+  chunkEnd: number
+  confidence: number
+  speed: string
+}
+
+/** Full raw model output captured for a chunk request (for the UI expander). */
+export interface ChunkRawOutput {
+  kind: 'scan' | 'rescan' | 'verify'
+  model: string
+  t: number
+  /** which segment this request was about (rescan/verify only) */
+  segment?: number
+  text: string
 }
 
 /** Forensic-level details captured for a segment during the segmentation pass. */

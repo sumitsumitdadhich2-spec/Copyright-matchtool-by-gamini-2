@@ -2,7 +2,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import crypto from 'node:crypto'
 import type { GoogleGenAI } from '@google/genai'
-import type { Scan, Candidate, MatchRegion, SegmentMatch, ShortSegment } from './types'
+import type { Scan, Candidate, MatchRegion, SegmentMatch, ShortSegment, ChunkState } from './types'
 import {
   MODEL_POOL,
   MODEL_MIN_INTERVAL_MS,
@@ -209,6 +209,45 @@ class Scheduler {
 
   private mark(job: Job) {
     job.dirty = true
+  }
+
+  /** Persist a verbatim Gemini response on a chunk (drives the UI raw-output expander).
+   *  Bounded: 20KB per entry, max 12 entries per chunk (oldest dropped). */
+  private recordChunkOutput(
+    chunk: ChunkState | undefined,
+    kind: 'scan' | 'rescan' | 'verify',
+    model: string,
+    text?: string,
+    segment?: number,
+  ) {
+    if (!chunk || !text) return
+    if (!chunk.rawOutputs) chunk.rawOutputs = []
+    chunk.rawOutputs.push({
+      kind,
+      model,
+      t: Date.now(),
+      ...(segment !== undefined ? { segment } : {}),
+      text: text.length > 20_000 ? `${text.slice(0, 20_000)}\n... [truncated]` : text,
+    })
+    if (chunk.rawOutputs.length > 12) chunk.rawOutputs.splice(0, chunk.rawOutputs.length - 12)
+  }
+
+  /** Merge duration-validated segment windows into the chunk's foundSegments (best per segment). */
+  private recordFoundSegments(
+    chunk: ChunkState | undefined,
+    windows: { segmentIndex: number; chunkStart: number; chunkEnd: number; confidence: number; speed: string }[],
+  ) {
+    if (!chunk || windows.length === 0) return
+    if (!chunk.foundSegments) chunk.foundSegments = []
+    for (const w of windows) {
+      const existing = chunk.foundSegments.find((f) => f.segmentIndex === w.segmentIndex)
+      if (existing) {
+        if (w.confidence >= existing.confidence) Object.assign(existing, w)
+      } else {
+        chunk.foundSegments.push({ ...w })
+      }
+    }
+    chunk.foundSegments.sort((a, b) => a.segmentIndex - b.segmentIndex)
   }
 
   /** modelStates key: lane 1 uses the plain model id (drives the Model Pool board);
@@ -568,11 +607,24 @@ class Scheduler {
           addLog(scan, 'info', `chunk ${idx}: searching ${activeSegs!.length} segment(s) — S${lockedIdx.join(', S')} locked (conf 100 / confirmed), excluded`)
         }
         const result = await scanChunkRequest(lane.ai, m.id, shortUri, uploaded.uri, segText, job.scan.movieGuess)
+        this.recordChunkOutput(chunk, 'scan', m.id, result.raw)
 
         // Server-side false-positive filter: when segments exist, the model's answer is
         // ONLY trusted if it reported per-segment windows of the segment's EXACT duration.
         const segs = activeSegs || []
         const enforced = segs.length > 0 ? enforceSegmentDurations(result, segs) : null
+        if (enforced) {
+          this.recordFoundSegments(
+            chunk,
+            enforced.valid.map((v) => ({
+              segmentIndex: v.segmentIndex,
+              chunkStart: v.chunkStart,
+              chunkEnd: v.chunkEnd,
+              confidence: v.confidence,
+              speed: v.speed || '1.0x',
+            })),
+          )
+        }
         if (enforced) {
           for (const d of enforced.dropped) {
             addLog(scan, 'warn', `chunk ${idx}: duration check — ${d.slice(0, 200)}`)
@@ -837,6 +889,7 @@ class Scheduler {
         const mu = await uploadVideo(lane.ai, movieClip)
         remoteNames.push(mu.name)
         const res = await liveVerifyRequest(lane.ai, m.id, su.uri, mu.uri)
+        this.recordChunkOutput(scan.chunks[sm.chunkIndex], 'verify', m.id, res.raw, sm.segmentIndex)
 
         sm.verification.attempts += 1
         sm.verification.model = m.id
@@ -904,6 +957,7 @@ class Scheduler {
           movieGuess: scan.movieGuess,
         }
         const result = await rescanSegmentRequest(lane.ai, m.id, su.uri, cu.uri, history)
+        this.recordChunkOutput(scan.chunks[targetChunk], 'rescan', m.id, result.raw, sm.segmentIndex)
 
         // Release the in-flight key BEFORE follow-up enqueues (they dedupe by key).
         job.verifyInFlight.delete(tKey)
@@ -916,6 +970,16 @@ class Scheduler {
         }
 
         const enforced = enforceSegmentDurations(result, [seg])
+        this.recordFoundSegments(
+          scan.chunks[targetChunk],
+          enforced.valid.map((v) => ({
+            segmentIndex: v.segmentIndex,
+            chunkStart: v.chunkStart,
+            chunkEnd: v.chunkEnd,
+            confidence: v.confidence,
+            speed: v.speed || '1.0x',
+          })),
+        )
         for (const d of enforced.dropped) addLog(scan, 'warn', `re-scan S${sm.segmentIndex}: ${d.slice(0, 160)}`)
         let best = enforced.valid.filter((v) => v.confidence >= CONFIDENCE_THRESHOLD).sort((a, b) => b.confidence - a.confidence)[0]
 
