@@ -390,6 +390,14 @@ ANTI-ECHO RULE (violating this invalidates your whole answer):
 - Claiming "the entire short matches this chunk cut-for-cut, every segment in order" requires the strongest possible evidence: for EACH segment your "evidence" field must cite a concrete visual fingerprint you saw in VIDEO 2 at that exact position (a background object, on-screen text, an extra's position), AND that position must be consistent with your chunk_inventory. Generic evidence like "same scene, same actors" is NOT acceptable for such a claim.
 - If you cannot genuinely locate a segment's frames inside Video 2, report NO match for it. An honest "no match" is correct; an invented timestamp is a critical failure.
 
+FABRICATED-TIMESTAMP RULE (the server enforces this mechanically):
+- A real frame-level match lands at an IRREGULAR position on Video 2's clock — like 00:23.417 or 00:41.708 — because real cuts almost never sit on exact whole seconds. Timestamps like 00:20.000, 00:35.000, 00:39.000 are the statistical signature of GUESSING, not of locating frames.
+- "chunk_start": "00:00.000" is the single most suspect value you can output. It means "I put the segment at the very start of the chunk because I didn't actually find it". A match at the chunk's exact start is only believable if your evidence describes the chunk's literal opening frame AND it is consistent with your chunk_inventory's first line.
+- SELF-CHECK before you answer: look at your draft segment_matches. If two or more of your chunk_start values end in .000 on a whole second, or any of them equal 00:00.000 without opening-frame evidence, you did NOT locate frames — go back and re-examine Video 2, or move those claims to "rejected_lookalikes".
+- The server automatically DISCARDS the entire answer when most reported windows sit on round whole seconds or at the chunk start, and rescans the chunk with a different model. Fabricated timestamps never survive; honest "no match" answers do.
+- Two DIFFERENT segments can never occupy the same or overlapping windows of Video 2 (they are different recordings). If your draft maps two segments to the same position, at least one is invented — the server rejects BOTH.
+- The same reasoning applies across chunks: one segment exists at exactly ONE place in the movie (barring an explicit flashback/recap you can describe). Claiming it here at high confidence when it plausibly lives elsewhere means you must have opening-to-closing frame evidence from THIS chunk.
+
 CRITICAL WARNINGS (false positives must be ELIMINATED):
 - YOUR DEFAULT ANSWER FOR EVERY SEGMENT IS "NO MATCH". A segment moves to "segment_matches" ONLY when frame evidence forensically compels you — never because it "probably" matches or "looks right".
 - Movies contain many similar-looking scenes: same actors, same location, same costumes, similar framing. These are NOT matches. A different moment or a different take of the same scene must be REJECTED even if it looks 90% similar.
@@ -397,10 +405,12 @@ CRITICAL WARNINGS (false positives must be ELIMINATED):
 - Any candidate window whose duration does not equal the segment's exact duration (after accounting for a verified speed change) is a FALSE POSITIVE — put it in "rejected_lookalikes", never in "segment_matches".
 - A false positive is much worse than a miss. When in doubt, leave it out and record it in "rejected_lookalikes" with the reason.
 
-CONFIDENCE SCALE (per segment — STRICT):
-- 95-100: all six tests passed, start and end frames verified identical.
-- 90-94: same take, minor uncertainty (e.g. compression artifacts).
+CONFIDENCE SCALE (per segment — STRICT, calibration is enforced):
+- 95-100: ONLY allowed when your "evidence" field cites at least one UNIQUE visual fingerprint you saw in VIDEO 2 at the exact reported position — a specific background object, on-screen text, an extra's position, a prop orientation — tied to a concrete timestamp (e.g. "at 00:23.4 in Video 2 the red kettle sits left of the stove, identical to the segment's start frame"). Generic evidence ("same scene", "same actors", "matches description") NEVER justifies 95+.
+- 90-94: all six tests passed with frame-level certainty, minor uncertainty only (e.g. compression artifacts) — evidence must still cite what you saw in Video 2, not in the description.
+- If you cannot cite a unique Video-2 fingerprint with its timestamp, your confidence is AT MOST 70 — which means the claim goes in "rejected_lookalikes", not "segment_matches".
 - Below 90: DO NOT report the segment at all. It goes in "rejected_lookalikes" instead. The server DISCARDS anything under 90.
+- NEVER output 100 as a reflex. If every one of your matches is 96-100, your calibration is broken — re-examine each one and downgrade any claim whose evidence is generic.
 
 All timestamps in mm:ss.mmm (millisecond precision).
 
@@ -1091,6 +1101,53 @@ export function enforceSegmentDurations(result: ChunkScanResult, segments: Short
 
   const confidence = valid.length > 0 ? Math.max(...valid.map((v) => v.confidence)) : 0
   return { match: valid.length > 0, confidence, valid, dropped }
+}
+
+/** FABRICATED-TIMESTAMP DETECTOR for chunk-scan answers (the chunk-scan twin of
+ *  looksLikeUniformSlicing). Real frame matches land at irregular positions on the
+ *  chunk's clock; models that hallucinate stick windows at the chunk's start (00:00.000)
+ *  or on round whole seconds (220.000, 300.000...). Returns a human-readable reason when
+ *  the answer's windows carry that fabrication signature, else null. */
+export function looksFabricatedWindows(valid: ValidatedSegmentMatch[]): string | null {
+  if (valid.length === 0) return null
+  const isRound = (t: number) => Math.abs(t - Math.round(t)) < 0.002
+  const atChunkStart = valid.filter((v) => v.chunkStart <= 0.05)
+  // 2+ segments all "starting" at the chunk's first frame = pasted, not found.
+  if (atChunkStart.length >= 2) {
+    return `${atChunkStart.length} segment(s) all claimed at the chunk's exact start (00:00.000) — windows pasted, not located`
+  }
+  const roundStarts = valid.filter((v) => isRound(v.chunkStart)).length
+  // Most windows on exact whole-second chunk_start values = statistical fabrication signature.
+  if (valid.length >= 2 && roundStarts >= 2 && roundStarts / valid.length >= 0.7) {
+    return `${roundStarts}/${valid.length} window(s) start on exact whole seconds — real frame matches land at irregular timestamps`
+  }
+  // A single claim that is BOTH at the chunk start AND on a round second is suspect on its own.
+  if (valid.length === 1 && valid[0].chunkStart <= 0.05 && isRound(valid[0].chunkEnd)) {
+    return `single window pinned to chunk start with round-second end — fabrication signature`
+  }
+  return null
+}
+
+/** Two DIFFERENT segments mapped to the same/overlapping chunk window are physically
+ *  impossible (different recordings can't occupy the same footage). Returns the set of
+ *  segment indexes involved in any overlap — ALL of them are untrustworthy. */
+export function findOverlappingWindows(valid: ValidatedSegmentMatch[]): Set<number> {
+  const bad = new Set<number>()
+  for (let i = 0; i < valid.length; i++) {
+    for (let j = i + 1; j < valid.length; j++) {
+      const a = valid[i]
+      const b = valid[j]
+      if (a.segmentIndex === b.segmentIndex) continue
+      const overlap = Math.min(a.chunkEnd, b.chunkEnd) - Math.max(a.chunkStart, b.chunkStart)
+      const minDur = Math.min(a.chunkEnd - a.chunkStart, b.chunkEnd - b.chunkStart)
+      // >25% of the shorter window shared = same footage claimed twice.
+      if (overlap > Math.max(0.15, minDur * 0.25)) {
+        bad.add(a.segmentIndex)
+        bad.add(b.segmentIndex)
+      }
+    }
+  }
+  return bad
 }
 
 /** Parse "mm:ss-mm:ss" (or h:mm:ss / mm:ss.mmm) into seconds tuple. Returns null when unparseable. */

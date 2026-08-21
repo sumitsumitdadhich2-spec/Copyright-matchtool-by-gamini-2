@@ -15,7 +15,7 @@ export function CandidatesPanel({ scan }: { scan: Scan }) {
       </div>
       {scan.candidates.length === 0 ? (
         <p className="mt-2 text-xs text-muted-foreground">
-          Accepted matches (confidence &ge; 85) appear here live as the scan runs.
+          Scanner candidates appear here live as the scan runs. Model confidence is informational only — a candidate counts as matched only after 24fps verifier confirmation.
         </p>
       ) : (
         <div className="mt-3 grid gap-3 md:grid-cols-2">
@@ -55,7 +55,12 @@ function CandidateCard({ scan, c }: { scan: Scan; c: Candidate }) {
         <span className="font-mono text-sm font-semibold text-destructive">
           {fmtTime(c.absSegment[0])} – {fmtTime(c.absSegment[1])}
         </span>
-        <span className="rounded-full bg-destructive/15 px-2 py-0.5 font-mono text-xs text-destructive">conf {c.confidence}</span>
+        <span
+          title="Self-reported model confidence — informational only, not used for ranking; only the 24fps verifier decides"
+          className="rounded-full bg-destructive/15 px-2 py-0.5 font-mono text-xs text-destructive"
+        >
+          model conf {c.confidence}
+        </span>
       </div>
       <div className="mt-1.5 grid gap-0.5 text-xs text-muted-foreground">
         <span>
