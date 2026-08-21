@@ -37,6 +37,8 @@ import {
   rescanSegmentRequest,
   parseSegment,
   enforceSegmentDurations,
+  looksFabricatedWindows,
+  findOverlappingWindows,
   GeminiError,
   type RescanHistory,
 } from './gemini'
@@ -423,15 +425,14 @@ class Scheduler {
     job.verifyQueue.push(t)
   }
 
-  /** CONFIDENCE-ORDERED dequeue: the candidate with the highest scan confidence is
-   *  verified FIRST. Verify tasks outrank rescan tasks so a freshly-found window is
-   *  checked immediately while the next rescan runs in parallel. */
+  /** SEGMENT-ORDERED dequeue: model-reported confidence is NOT trusted for ranking
+   *  (fabricated claims routinely carry 96-100), so tasks run in segment order instead.
+   *  Verify tasks still outrank rescan tasks so a freshly-found window is checked
+   *  immediately while the next rescan runs in parallel. */
   private dequeueVerify(job: Job): VerifyTask | null {
-    const conf = (t: VerifyTask) =>
-      (job.scan.segmentMatches || []).find((s) => s.segmentIndex === t.segmentIndex)?.confidence ?? 0
     job.verifyQueue.sort((a, b) => {
       if (a.kind !== b.kind) return a.kind === 'verify' ? -1 : 1
-      return conf(b) - conf(a)
+      return a.segmentIndex - b.segmentIndex
     })
     return job.verifyQueue.shift() || null
   }
@@ -644,6 +645,62 @@ class Scheduler {
           continue
         }
 
+        // ----- SERVER-SIDE FABRICATED-TIMESTAMP GUARD -----
+        // Same trick that fixed segmentation: models that hallucinate stick their
+        // "matches" at the chunk's start (00:00.000) or on round whole seconds.
+        // Such an answer is discarded ENTIRELY and the chunk is rescanned by a
+        // DIFFERENT model — fabricated windows must never reach the verifier queue.
+        const fabricated = enforced ? looksFabricatedWindows(enforced.valid) : null
+        if (fabricated) {
+          if (chunk.attempts <= 2) {
+            chunk.status = 'pending'
+            chunk.model = undefined
+            job.queue.push(idx)
+            addLog(
+              scan,
+              'warn',
+              `chunk ${idx}: FABRICATED timestamps detected (${fabricated}) — whole answer DISCARDED, chunk re-queued for rescan on another model (attempt ${chunk.attempts}/3)`,
+            )
+          } else {
+            chunk.status = 'no_match'
+            chunk.confidence = 0
+            addLog(
+              scan,
+              'error',
+              `chunk ${idx}: FABRICATED timestamps again after ${chunk.attempts} attempts (${fabricated}) — chunk marked no_match, fabricated claims never reach the verifier`,
+            )
+          }
+          this.mark(job)
+          continue
+        }
+
+        // ----- SERVER-SIDE OVERLAP GUARD -----
+        // Two DIFFERENT segments cannot occupy the same/overlapping movie window —
+        // if the model maps 2+ segments onto the same footage, ALL of those claims
+        // are invented. Reject every segment involved in an overlap.
+        if (enforced && enforced.valid.length >= 2) {
+          const overlapping = findOverlappingWindows(enforced.valid)
+          if (overlapping.size > 0) {
+            const ids = [...overlapping].sort((a, b) => a - b).map((s) => `S${s}`).join(', ')
+            enforced.valid = enforced.valid.filter((v) => !overlapping.has(v.segmentIndex))
+            enforced.match = enforced.valid.length > 0
+            enforced.confidence = enforced.valid.length > 0 ? Math.max(...enforced.valid.map((v) => v.confidence)) : 0
+            addLog(
+              scan,
+              'warn',
+              `chunk ${idx}: OVERLAP contradiction — ${ids} claimed at the same/overlapping chunk window; different segments can't share footage — ALL overlapping claims rejected`,
+            )
+            if (enforced.valid.length === 0 && chunk.attempts <= 2) {
+              chunk.status = 'pending'
+              chunk.model = undefined
+              job.queue.push(idx)
+              addLog(scan, 'warn', `chunk ${idx}: nothing valid left after overlap rejection — chunk re-queued for rescan (attempt ${chunk.attempts}/3)`)
+              this.mark(job)
+              continue
+            }
+          }
+        }
+
         if (enforced) {
           this.recordFoundSegments(
             chunk,
@@ -721,38 +778,19 @@ class Scheduler {
                 // This exact window was already REJECTED by the 24fps verifier — never retry it.
                 addLog(scan, 'info', `  S${x.segmentIndex}: candidate ${fmt(sm.movieStart)}-${fmt(sm.movieEnd)} ignored — window already rejected by verifier`)
                 continue
-              } else if (sm.confidence > existing.confidence || existing.verification?.state === 'rejected_final') {
+              } else if (existing.verification?.state === 'rejected_final') {
+                // The current window was definitively rejected by the verifier — the new
+                // claim replaces it and goes straight to 24fps verification.
                 this.recordCandidateChunk(existing, idx, x.confidence)
-                const windowChanged = !sameWindow(existing.movieStart, existing.movieEnd, sm.movieStart, sm.movieEnd)
-                const wasRejected = existing.verification?.state === 'rejected_final'
-                const prevVerification = existing.verification
-                // Keep the displaced (unverified) window as an alternate — it may still be
-                // the real match if the new one gets rejected.
-                if (windowChanged && !wasRejected) {
-                  this.addAlternate(existing, {
-                    shortStart: existing.shortStart,
-                    shortEnd: existing.shortEnd,
-                    movieStart: existing.movieStart,
-                    movieEnd: existing.movieEnd,
-                    confidence: existing.confidence,
-                    speed: existing.speed,
-                    model: existing.model,
-                    chunkIndex: existing.chunkIndex,
-                  })
-                }
                 Object.assign(existing, sm)
-                // Object.assign copies sm's fresh verification too — restore the real
-                // state unless the mapping actually changed (or was rejected before).
-                if (windowChanged || wasRejected) {
-                  existing.verification = { state: 'pending', attempts: 0 }
-                } else {
-                  existing.verification = prevVerification
-                }
-                if (existing.verification?.state === 'pending') this.enqueueVerify(job, sm.segmentIndex)
+                existing.verification = { state: 'pending', attempts: 0 }
+                this.enqueueVerify(job, sm.segmentIndex)
               } else {
-                // SUSPECT-CONFIDENCE RULE: any accepted match below conf 100 stays suspect,
-                // so equal/lower-confidence windows found in LATER chunks are kept as
-                // alternates — promoted for 24fps verification if the current one fails.
+                // MODEL CONFIDENCE IS NOT TRUSTED FOR RANKING: a higher self-reported
+                // confidence NEVER displaces the current pending window (fabricated claims
+                // routinely carry 96-100). Every differing window found in ANY chunk is
+                // kept as an alternate — the 24fps verifier decides, and alternates are
+                // promoted only after the current one is rejected.
                 // NOTE: the same footage CAN legitimately appear twice in a movie
                 // (flashback/recap/repeated establishing shot) — duplicates are NOT
                 // auto-rejected; the 24fps verifier decides and the first CONFIRM wins.
@@ -1035,6 +1073,13 @@ class Scheduler {
           })),
         )
         for (const d of enforced.dropped) addLog(scan, 'warn', `re-scan S${sm.segmentIndex}: ${d.slice(0, 160)}`)
+        // FABRICATED-TIMESTAMP GUARD (rescan path): a window pinned to the chunk's
+        // start / round whole seconds is pasted, not found — discard it.
+        const fabricatedRescan = looksFabricatedWindows(enforced.valid)
+        if (fabricatedRescan) {
+          addLog(scan, 'warn', `re-scan S${sm.segmentIndex} (chunk ${targetChunk}): FABRICATED timestamps (${fabricatedRescan}) — result discarded`)
+          enforced.valid = []
+        }
         let best = enforced.valid.filter((v) => v.confidence >= CONFIDENCE_THRESHOLD).sort((a, b) => b.confidence - a.confidence)[0]
 
         if (best) {
@@ -1162,20 +1207,14 @@ class Scheduler {
     return false
   }
 
-  /** Segments that no longer need to be searched in upcoming chunks:
-   *  24fps-CONFIRMED, or matched at confidence 100 (and not verifier-rejected).
-   *  Anything below 100 is treated as suspect and keeps being searched everywhere. */
+  /** Segments that no longer need to be searched in upcoming chunks: 24fps-CONFIRMED only.
+   *  Model-reported confidence is NEVER trusted for locking — Gemini was caught emitting
+   *  100-confidence claims for fabricated windows, so only a verifier CONFIRM locks a
+   *  segment. Everything else stays searchable everywhere. */
   private lockedSegmentIndexes(scan: Scan): Set<number> {
     const out = new Set<number>()
     for (const sm of scan.segmentMatches || []) {
-      const st = sm.verification?.state
-      if (st === 'rejected_final') continue
-      // CONTRADICTION GUARD: an unverified conf-100 claim only locks a segment while a
-      // SINGLE chunk has ever claimed it. The moment 2+ chunks claim the same segment,
-      // both claims are suspect and the segment stays searchable until the 24fps
-      // verifier confirms one of them.
-      const claimedBy = (sm.candidateChunks || []).length
-      if (st === 'confirmed' || (sm.confidence >= 100 && claimedBy <= 1)) out.add(sm.segmentIndex)
+      if (sm.verification?.state === 'confirmed') out.add(sm.segmentIndex)
     }
     return out
   }
