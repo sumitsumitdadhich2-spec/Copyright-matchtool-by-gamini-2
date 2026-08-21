@@ -904,6 +904,9 @@ class Scheduler {
           sm.verification.state = 'confirmed'
           sm.verification.note = res.note
           sm.verification.reason = undefined
+          // Persist the verifier-reported exact matched extent (clip-relative) for the UI.
+          if (res.matchedV1) sm.verification.matchedShortRange = res.matchedV1
+          if (res.matchedV2) sm.verification.matchedMovieRange = res.matchedV2
           const fmtT = (sec: number) => {
             const mm = Math.floor(sec / 60)
             const ss = sec - mm * 60

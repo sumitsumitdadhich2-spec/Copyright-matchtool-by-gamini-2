@@ -84,6 +84,10 @@ export interface SegmentVerification {
   reason?: string
   /** verifier note on confirm */
   note?: string
+  /** exact matched extent WITHIN the short clip [start, end] seconds, reported by the 24fps verifier on CONFIRM */
+  matchedShortRange?: [number, number]
+  /** exact matched extent WITHIN the movie clip [start, end] seconds (clip-relative), reported by the 24fps verifier on CONFIRM */
+  matchedMovieRange?: [number, number]
   /** first (rejected) movie window kept for the report, before a rescan remapped it */
   rejectedWindow?: [number, number]
 }

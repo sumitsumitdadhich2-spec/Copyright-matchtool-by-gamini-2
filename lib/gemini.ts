@@ -546,6 +546,7 @@ export async function segmentShortRequest(
                 end_frame: String(s.end_frame || ''),
                 background_details: String(s.background_details || ''),
                 audio: String(s.audio || ''),
+                ...(s.distinguishing_marks ? { distinguishing_marks: String(s.distinguishing_marks) } : {}),
               },
             }
           : {}),

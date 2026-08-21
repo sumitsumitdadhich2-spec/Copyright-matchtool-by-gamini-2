@@ -94,10 +94,26 @@ function ChunkRow({ scan, chunk }: { scan: Scan; chunk: ChunkState }) {
         <div className="flex flex-wrap items-center gap-1.5">
           {found.map((f) => {
             const st = badgeState(scan, chunk, f)
+            const sm = (scan.segmentMatches || []).find((s) => s.segmentIndex === f.segmentIndex)
+            const v = sm?.verification
+            // Verifier-reported exact matched extent, clip-relative → absolute movie time.
+            const extent =
+              st === 'confirmed' && sm && v?.matchedMovieRange
+                ? ([sm.movieStart + v.matchedMovieRange[0], sm.movieStart + v.matchedMovieRange[1]] as [number, number])
+                : null
+            const extentShort =
+              st === 'confirmed' && sm && v?.matchedShortRange
+                ? ([sm.shortStart + v.matchedShortRange[0], sm.shortStart + v.matchedShortRange[1]] as [number, number])
+                : null
+            const title =
+              `S${f.segmentIndex}: ${fmtTime(base + f.chunkStart)} – ${fmtTime(base + f.chunkEnd)} in movie · conf ${f.confidence} · ${f.speed} · ${BADGE_LABEL[st]}` +
+              (extent && extentShort
+                ? ` · verified extent: short ${fmtTime(extentShort[0])}–${fmtTime(extentShort[1])} ↔ movie ${fmtTime(extent[0])}–${fmtTime(extent[1])}`
+                : '')
             return (
               <span
                 key={`${f.segmentIndex}-${f.chunkStart}`}
-                title={`S${f.segmentIndex}: ${fmtTime(base + f.chunkStart)} – ${fmtTime(base + f.chunkEnd)} in movie · conf ${f.confidence} · ${f.speed} · ${BADGE_LABEL[st]}`}
+                title={title}
                 className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] ${BADGE_STYLE[st]}`}
               >
                 S{f.segmentIndex}
@@ -105,6 +121,11 @@ function ChunkRow({ scan, chunk }: { scan: Scan; chunk: ChunkState }) {
                   {fmtTime(base + f.chunkStart)}–{fmtTime(base + f.chunkEnd)}
                 </span>
                 <span className="opacity-70">c{f.confidence}</span>
+                {extent && (
+                  <span className="font-semibold">
+                    ✓ {fmtTime(extent[0])}–{fmtTime(extent[1])}
+                  </span>
+                )}
                 <span className="sr-only">{BADGE_LABEL[st]}</span>
               </span>
             )
