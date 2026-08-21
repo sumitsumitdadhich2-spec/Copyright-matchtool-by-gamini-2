@@ -84,10 +84,17 @@ export interface SegmentMatch {
   /** live 24fps verification result (2-key flow); absent = never queued */
   verification?: SegmentVerification
   /** alternative windows found in OTHER chunks while the current mapping was unverified —
-   *  promoted for verification if the current mapping is rejected by the 24fps verifier */
+   *  promoted for verification if the current mapping is rejected by the 24fps verifier.
+   *  Duplicates across chunks are EXPECTED (flashbacks/recaps repeat footage) — the
+   *  verifier decides which candidate is real; the first CONFIRM wins. */
   alternates?: SegmentAlternate[]
   /** all movie windows the verifier has finally rejected for this segment — never re-tried */
   rejectedWindows?: [number, number][]
+  /** every chunk that ever produced a candidate window for this segment (best confidence
+   *  per chunk) — drives the confidence-ordered rescan after all candidates are rejected */
+  candidateChunks?: { chunkIndex: number; confidence: number }[]
+  /** chunks still waiting for a 24fps rescan (confidence order, highest first) */
+  rescanChunkQueue?: number[]
 }
 
 /** An alternative candidate window for a segment, found in a different chunk while
