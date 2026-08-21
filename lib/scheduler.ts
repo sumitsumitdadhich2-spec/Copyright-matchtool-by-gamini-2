@@ -644,6 +644,51 @@ class Scheduler {
           continue
         }
 
+        // ----- SERVER-SIDE FABRICATION DETECTOR -----
+        // Overlapping windows / round-second majority / multiple 00:00.000-anchored claims
+        // mean the model invented positions. The whole answer is untrustworthy: discard it
+        // and re-queue the chunk on another model (same policy as the echo detector).
+        const fab = enforced ? this.fabricationReason(enforced.valid) : null
+        if (fab) {
+          if (chunk.attempts <= 2) {
+            chunk.status = 'pending'
+            chunk.model = undefined
+            job.queue.push(idx)
+            addLog(
+              scan,
+              'warn',
+              `chunk ${idx}: FABRICATION detected — ${fab} (by ${m.id}) — result DISCARDED, chunk re-queued for rescan (attempt ${chunk.attempts}/3)`,
+            )
+          } else {
+            chunk.status = 'no_match'
+            chunk.confidence = 0
+            addLog(
+              scan,
+              'error',
+              `chunk ${idx}: FABRICATION detected again after ${chunk.attempts} attempts — result discarded, chunk marked no_match (fabricated claims never reach the verifier)`,
+            )
+          }
+          this.mark(job)
+          continue
+        }
+
+        // ZERO-ANCHOR SUSPECT: a lone claim starting exactly at the chunk's first frame is
+        // the classic "defaulted to 00:00" hallucination. Do not discard the whole answer,
+        // but demote the claim below the acceptance threshold so it never reaches the
+        // segment map — the segment stays searchable and can be re-found honestly.
+        if (enforced) {
+          for (const v of enforced.valid) {
+            if (v.chunkStart <= 0.05 && v.confidence >= CONFIDENCE_THRESHOLD) {
+              addLog(
+                scan,
+                'warn',
+                `chunk ${idx}: S${v.segmentIndex} claimed at chunk start 00:00.000 with conf ${v.confidence} — zero-anchor suspect, demoted to 70 (dropped)`,
+              )
+              v.confidence = 70
+            }
+          }
+        }
+
         if (enforced) {
           this.recordFoundSegments(
             chunk,
@@ -1162,6 +1207,43 @@ class Scheduler {
     return false
   }
 
+  /** FABRICATION DETECTOR: catches chunk-scan answers where the model invented positions
+   *  instead of locating frames. Signatures seen in real failed scans:
+   *  (a) two DIFFERENT segments claimed at the same/overlapping chunk window — two different
+   *      recordings can never occupy the same footage, so at least one claim is invented;
+   *  (b) most chunk_start values on exact whole seconds — real frame positions land at
+   *      irregular millisecond values, round numbers mean the model estimated;
+   *  (c) 2+ claims anchored at the chunk's very first frame (00:00.000) — the signature of
+   *      defaulting to "start of Video 2" without watching it.
+   *  Returns a human-readable reason, or null when the answer looks genuine. */
+  private fabricationReason(
+    valid: { segmentIndex: number; chunkStart: number; chunkEnd: number }[],
+  ): string | null {
+    if (valid.length === 0) return null
+    // (a) overlapping windows for different segments
+    const sorted = [...valid].sort((a, b) => a.chunkStart - b.chunkStart)
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1]
+      const cur = sorted[i]
+      if (cur.segmentIndex !== prev.segmentIndex && cur.chunkStart < prev.chunkEnd - 0.2) {
+        return `S${prev.segmentIndex} and S${cur.segmentIndex} claim overlapping chunk windows (${prev.chunkStart.toFixed(3)}-${prev.chunkEnd.toFixed(3)}s vs ${cur.chunkStart.toFixed(3)}-${cur.chunkEnd.toFixed(3)}s) — two different recordings cannot occupy the same footage`
+      }
+    }
+    // (b) round-second majority
+    if (valid.length >= 3) {
+      const round = valid.filter((v) => Math.abs(v.chunkStart - Math.round(v.chunkStart)) < 0.002).length
+      if (round / valid.length >= 0.8) {
+        return `${round}/${valid.length} chunk_start values land on exact whole seconds — positions were estimated, not frame-located`
+      }
+    }
+    // (c) multiple claims anchored at chunk start 00:00.000
+    const zeroAnchored = valid.filter((v) => v.chunkStart <= 0.05).length
+    if (zeroAnchored >= 2) {
+      return `${zeroAnchored} segments all claimed to start at the chunk's first frame (00:00.000) — the model defaulted to the start of Video 2 instead of locating frames`
+    }
+    return null
+  }
+
   /** Segments that no longer need to be searched in upcoming chunks:
    *  24fps-CONFIRMED, or matched at confidence 100 (and not verifier-rejected).
    *  Anything below 100 is treated as suspect and keeps being searched everywhere. */
@@ -1532,17 +1614,30 @@ class Scheduler {
             model: confirmed[0].verification?.model || 'live-verifier',
             note: `All ${segs.length} segment(s) frame-verified at 24fps`,
           }
-        } else {
+        } else if (confirmed.length > 0) {
+          // Partially verified: the region counts, but ONLY on the strength of its
+          // 24fps-CONFIRMED segments — scan-model confidence is never used as a verdict.
           region.verified = {
             match: true,
-            confidence: region.maxConfidence,
-            model: 'unverified',
-            note: `${confirmed.length}/${segs.length} segment(s) verified — rest pending (verifier quota/errors); scan confidence kept`,
+            confidence: Math.max(...confirmed.map((s) => s.verification?.confidence || 0)),
+            model: confirmed[0].verification?.model || 'live-verifier',
+            note: `${confirmed.length}/${segs.length} segment(s) frame-verified at 24fps — unverified segments do NOT count toward this match`,
+          }
+        } else {
+          // ZERO confirmed segments: the scan model's self-reported confidence is NOT
+          // trusted as a match verdict. This region is reported as no-match.
+          region.verified = {
+            match: false,
+            confidence: 0,
+            model: 'live-verifier',
+            note: `0/${segs.length} segment(s) passed 24fps verification — scan-model confidence alone is never accepted as a match`,
           }
         }
       }
       for (const g of this.groupOverlapping(regions)) {
-        const best = g.reduce((a, b) => ((b.verified?.confidence || 0) > (a.verified?.confidence || 0) ? b : a))
+        const matching = g.filter((r) => r.verified?.match)
+        if (matching.length === 0) continue
+        const best = matching.reduce((a, b) => ((b.verified?.confidence || 0) > (a.verified?.confidence || 0) ? b : a))
         best.selected = true
       }
       this.mark(job)
