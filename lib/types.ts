@@ -53,8 +53,8 @@ export interface SegmentVerification {
   confidence?: number
   /** model that produced the last verdict */
   model?: string
-  /** which API key lane ran the last verification: 1 = scanner key, 2 = verifier key */
-  keyLane?: 1 | 2
+  /** which API key lane (1-5) ran the last verification */
+  keyLane?: number
   /** detailed visual rejection reason from the verifier (why it is NOT the same footage) */
   reason?: string
   /** verifier note on confirm */

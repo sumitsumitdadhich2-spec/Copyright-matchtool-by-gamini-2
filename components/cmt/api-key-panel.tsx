@@ -2,33 +2,48 @@
 
 import { useState } from 'react'
 import useSWR from 'swr'
-import { KeyRound, Check, ShieldCheck } from 'lucide-react'
+import { KeyRound, Check, ShieldCheck, X } from 'lucide-react'
 import { fetcher } from '@/lib/format'
 
-interface SettingsResponse {
+interface KeySlot {
+  index: number
   hasKey: boolean
   maskedKey: string | null
-  hasKey2: boolean
-  maskedKey2: string | null
+}
+
+interface SettingsResponse {
+  keys: KeySlot[]
+  maxKeys: number
+}
+
+const SLOT_LABELS: Record<number, string> = {
+  1: 'API Key 1 — Main Scanner',
+  2: 'API Key 2 — Worker (optional)',
+  3: 'API Key 3 — Worker (optional)',
+  4: 'API Key 4 — Worker (optional)',
+  5: 'API Key 5 — Worker (optional)',
 }
 
 export function ApiKeyPanel() {
   const { data, mutate } = useSWR<SettingsResponse>('/api/settings', fetcher)
-  const [value, setValue] = useState('')
-  const [value2, setValue2] = useState('')
-  const [saving, setSaving] = useState<1 | 2 | null>(null)
-  const [saved, setSaved] = useState<1 | 2 | null>(null)
+  const [values, setValues] = useState<Record<number, string>>({})
+  const [saving, setSaving] = useState<number | null>(null)
+  const [saved, setSaved] = useState<number | null>(null)
+  const [removing, setRemoving] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  async function save(which: 1 | 2) {
-    const v = (which === 1 ? value : value2).trim()
+  const slots: KeySlot[] =
+    data?.keys ?? Array.from({ length: 5 }, (_, i) => ({ index: i + 1, hasKey: false, maskedKey: null }))
+
+  async function save(n: number) {
+    const v = (values[n] || '').trim()
     if (!v) return
-    setSaving(which)
+    setSaving(n)
     setError(null)
     const res = await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(which === 1 ? { apiKey: v } : { apiKey2: v }),
+      body: JSON.stringify({ [`apiKey${n}`]: v }),
     })
     setSaving(null)
     if (!res.ok) {
@@ -36,93 +51,100 @@ export function ApiKeyPanel() {
       setError(j.error || 'Failed to save key')
       return
     }
-    if (which === 1) setValue('')
-    else setValue2('')
-    setSaved(which)
+    setValues((p) => ({ ...p, [n]: '' }))
+    setSaved(n)
     setTimeout(() => setSaved(null), 2500)
+    void mutate()
+  }
+
+  async function remove(n: number) {
+    setRemoving(n)
+    setError(null)
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: n }),
+    })
+    setRemoving(null)
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}))
+      setError(j.error || 'Failed to remove key')
+      return
+    }
     void mutate()
   }
 
   return (
     <section aria-label="API key settings" className="rounded-lg border border-border bg-card p-4">
-      {/* ----- Key 1: Main Scanner ----- */}
-      <div className="flex items-center gap-2">
-        <KeyRound className="size-4 text-primary" aria-hidden />
-        <h2 className="text-sm font-semibold">API Key 1 — Main Scanner</h2>
-        {data?.hasKey ? (
-          <span className="ml-auto flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 font-mono text-xs text-success">
-            <Check className="size-3" aria-hidden />
-            {data.maskedKey}
-          </span>
-        ) : (
-          <span className="ml-auto rounded-full bg-destructive/15 px-2 py-0.5 text-xs text-destructive">not set</span>
-        )}
-      </div>
-      <div className="mt-3 flex gap-2">
-        <input
-          type="password"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) save(1)
-          }}
-          placeholder={data?.hasKey ? 'Paste a new key to replace' : 'Paste your Gemini API key'}
-          aria-label="Gemini API key 1 (main scanner)"
-          className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
-        />
-        <button
-          type="button"
-          onClick={() => save(1)}
-          disabled={saving !== null || !value.trim()}
-          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40"
-        >
-          {saving === 1 ? 'Saving...' : saved === 1 ? 'Saved' : data?.hasKey ? 'Update' : 'Save'}
-        </button>
-      </div>
+      {slots.map((slot) => {
+        const n = slot.index
+        const Icon = n === 1 ? KeyRound : ShieldCheck
+        return (
+          <div key={n} className={n === 1 ? '' : 'mt-4 border-t border-border pt-4'}>
+            <div className="flex items-center gap-2">
+              <Icon className="size-4 text-primary" aria-hidden />
+              <h2 className="text-sm font-semibold">{SLOT_LABELS[n] || `API Key ${n}`}</h2>
+              {slot.hasKey ? (
+                <span className="ml-auto flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 font-mono text-xs text-success">
+                  <Check className="size-3" aria-hidden />
+                  {slot.maskedKey}
+                </span>
+              ) : n === 1 ? (
+                <span className="ml-auto rounded-full bg-destructive/15 px-2 py-0.5 text-xs text-destructive">not set</span>
+              ) : (
+                <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 text-xs text-muted-foreground">not set</span>
+              )}
+            </div>
+            <div className="mt-3 flex gap-2">
+              <input
+                type="password"
+                value={values[n] || ''}
+                onChange={(e) => setValues((p) => ({ ...p, [n]: e.target.value }))}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) save(n)
+                }}
+                placeholder={
+                  slot.hasKey
+                    ? 'Paste a new key to replace'
+                    : n === 1
+                      ? 'Paste your Gemini API key'
+                      : `Paste Gemini API key ${n} (different account)`
+                }
+                aria-label={`Gemini API key ${n}`}
+                className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
+              />
+              <button
+                type="button"
+                onClick={() => save(n)}
+                disabled={saving !== null || !(values[n] || '').trim()}
+                className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40"
+              >
+                {saving === n ? 'Saving...' : saved === n ? 'Saved' : slot.hasKey ? 'Update' : 'Save'}
+              </button>
+              {n !== 1 && slot.hasKey && (
+                <button
+                  type="button"
+                  onClick={() => remove(n)}
+                  disabled={removing !== null}
+                  aria-label={`Remove API key ${n}`}
+                  title="Remove this key"
+                  className="rounded-md border border-border px-2.5 py-2 text-sm text-muted-foreground hover:text-destructive disabled:opacity-40"
+                >
+                  {removing === n ? '...' : <X className="size-4" aria-hidden />}
+                </button>
+              )}
+            </div>
+          </div>
+        )
+      })}
 
-      {/* ----- Key 2: Verifier ----- */}
-      <div className="mt-4 flex items-center gap-2 border-t border-border pt-4">
-        <ShieldCheck className="size-4 text-primary" aria-hidden />
-        <h2 className="text-sm font-semibold">API Key 2 — Verifier (optional)</h2>
-        {data?.hasKey2 ? (
-          <span className="ml-auto flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 font-mono text-xs text-success">
-            <Check className="size-3" aria-hidden />
-            {data.maskedKey2}
-          </span>
-        ) : (
-          <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 text-xs text-muted-foreground">not set</span>
-        )}
-      </div>
-      <div className="mt-3 flex gap-2">
-        <input
-          type="password"
-          value={value2}
-          onChange={(e) => setValue2(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) save(2)
-          }}
-          placeholder={data?.hasKey2 ? 'Paste a new key to replace' : 'Paste a SECOND Gemini API key (different account)'}
-          aria-label="Gemini API key 2 (verifier)"
-          className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
-        />
-        <button
-          type="button"
-          onClick={() => save(2)}
-          disabled={saving !== null || !value2.trim()}
-          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40"
-        >
-          {saving === 2 ? 'Saving...' : saved === 2 ? 'Saved' : data?.hasKey2 ? 'Update' : 'Save'}
-        </button>
-      </div>
-
-      <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-        Key 1 scans chunks non-stop. Key 2 runs live 24fps verification in parallel so Key 1&apos;s rate limit is untouched — and
-        whichever key is free picks up the other&apos;s pending work. Both stored server-side only; daily counters tracked per key.
+      <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+        Add 1 to 5 keys — the scan works with ANY number. All keys scan chunks in parallel first, then all keys run 24fps
+        verification together, and whichever key is free picks up any pending work. Each key uses all 6 models with its own
+        daily counters. More keys = faster scans. Keys are stored server-side only.
       </p>
       {error && <p className="mt-1 text-xs text-destructive">{error}</p>}
-      {!data?.hasKey && (
-        <p className="mt-1 text-xs text-destructive">No Key 1 = no scan. Add it to enable scanning.</p>
-      )}
+      {!slots[0]?.hasKey && <p className="mt-1 text-xs text-destructive">No Key 1 = no scan. Add it to enable scanning.</p>}
     </section>
   )
 }
