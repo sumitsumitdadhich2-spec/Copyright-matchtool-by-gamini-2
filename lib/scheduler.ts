@@ -614,6 +614,36 @@ class Scheduler {
         // ONLY trusted if it reported per-segment windows of the segment's EXACT duration.
         const segs = activeSegs || []
         const enforced = segs.length > 0 ? enforceSegmentDurations(result, segs) : null
+
+        // ----- SERVER-SIDE ECHO DETECTOR -----
+        // A chunk that claims many segments at IDENTITY timestamps (chunkStart≈shortStart,
+        // chunkEnd≈shortEnd for nearly every claim) has just copied the segment list back
+        // from the prompt instead of actually locating footage. Such a result is discarded
+        // ENTIRELY and the chunk is re-queued on another model — echo garbage must never
+        // reach the segment map or the 24fps verifier.
+        if (enforced && this.isEchoResult(enforced.valid, segs.length)) {
+          if (chunk.attempts <= 2) {
+            chunk.status = 'pending'
+            chunk.model = undefined
+            job.queue.push(idx)
+            addLog(
+              scan,
+              'warn',
+              `chunk ${idx}: ECHO detected — ${enforced.valid.length} segment(s) claimed at identity timestamps (segment list copied back by ${m.id}) — result DISCARDED, chunk re-queued for rescan (attempt ${chunk.attempts}/3)`,
+            )
+          } else {
+            chunk.status = 'no_match'
+            chunk.confidence = 0
+            addLog(
+              scan,
+              'error',
+              `chunk ${idx}: ECHO detected again after ${chunk.attempts} attempts — result discarded, chunk marked no_match (echoed claims never reach the verifier)`,
+            )
+          }
+          this.mark(job)
+          continue
+        }
+
         if (enforced) {
           this.recordFoundSegments(
             chunk,
@@ -745,6 +775,17 @@ class Scheduler {
                       'info',
                       `  S${x.segmentIndex}: ALTERNATE window saved ${fmt(sm.movieStart)}-${fmt(sm.movieEnd)} conf ${sm.confidence} (chunk ${idx}) — will be verified if the current mapping is rejected`,
                     )
+                    // CONTRADICTION CHECK: the same segment claimed in 2+ distant chunks —
+                    // BOTH claims are suspect. Make sure the current primary is (re)queued
+                    // for 24fps verification; the alternate follows if the primary fails.
+                    if (Math.abs(idx - existing.chunkIndex) >= 2) {
+                      addLog(
+                        scan,
+                        'warn',
+                        `  S${x.segmentIndex}: CONTRADICTION — claimed in distant chunks ${existing.chunkIndex} and ${idx}; both windows treated as suspect until the 24fps verifier decides`,
+                      )
+                      if (existing.verification?.state === 'pending') this.enqueueVerify(job, x.segmentIndex)
+                    }
                   }
                 }
               }
@@ -1097,6 +1138,30 @@ class Scheduler {
     }
   }
 
+  /** ECHO DETECTOR: true when a chunk-scan result is a prompt echo — the model copied
+   *  the segment list back as "matches" instead of actually locating footage. Signature:
+   *  several segments claimed AND (nearly) all of them at IDENTITY timestamps, i.e. the
+   *  chunk-relative window equals the segment's own short-video window. A real match
+   *  landing at the exact same offsets for 3+ independent segments in one 60s chunk is
+   *  a physical near-impossibility — and claiming ~all segments in a single chunk while
+   *  other chunks claimed them too is a hard contradiction. */
+  private isEchoResult(
+    valid: { segmentIndex: number; chunkStart: number; chunkEnd: number; shortStart: number; shortEnd: number }[],
+    activeSegCount: number,
+  ): boolean {
+    if (valid.length < 3) return false
+    const identity = valid.filter(
+      (v) => Math.abs(v.chunkStart - v.shortStart) <= 0.5 && Math.abs(v.chunkEnd - v.shortEnd) <= 0.5,
+    ).length
+    const share = identity / valid.length
+    // 3+ identity claims making up >=70% of the answer = echo.
+    if (identity >= 3 && share >= 0.7) return true
+    // Mass claim: a chunk that "finds" >=80% of ALL searched segments with half of them
+    // on identity timestamps is echoing the prompt, not matching footage.
+    if (activeSegCount >= 5 && valid.length >= Math.ceil(activeSegCount * 0.8) && share >= 0.5) return true
+    return false
+  }
+
   /** Segments that no longer need to be searched in upcoming chunks:
    *  24fps-CONFIRMED, or matched at confidence 100 (and not verifier-rejected).
    *  Anything below 100 is treated as suspect and keeps being searched everywhere. */
@@ -1105,7 +1170,12 @@ class Scheduler {
     for (const sm of scan.segmentMatches || []) {
       const st = sm.verification?.state
       if (st === 'rejected_final') continue
-      if (st === 'confirmed' || sm.confidence >= 100) out.add(sm.segmentIndex)
+      // CONTRADICTION GUARD: an unverified conf-100 claim only locks a segment while a
+      // SINGLE chunk has ever claimed it. The moment 2+ chunks claim the same segment,
+      // both claims are suspect and the segment stays searchable until the 24fps
+      // verifier confirms one of them.
+      const claimedBy = (sm.candidateChunks || []).length
+      if (st === 'confirmed' || (sm.confidence >= 100 && claimedBy <= 1)) out.add(sm.segmentIndex)
     }
     return out
   }
@@ -1354,8 +1424,15 @@ class Scheduler {
    *  same way as their short windows, so a region's movie duration always equals its short
    *  duration. Never merge across distant movie positions. */
   private buildRegions(scan: Scan): MatchRegion[] {
-    const sms = (scan.segmentMatches || []).filter((s) => s.verification?.state !== 'rejected_final')
-    if (sms.length > 0) {
+    const all = scan.segmentMatches || []
+    const anyVerification = all.some((s) => s.verification)
+    // FINAL OUTPUT = CONFIRMED ONLY. Once the live 24fps verifier is in play, a segment
+    // enters the final regions ONLY after an explicit CONFIRM. Rejected AND still-pending
+    // segments are excluded — scanner confidence alone is NEVER enough for the report.
+    const sms = anyVerification
+      ? all.filter((s) => s.verification?.state === 'confirmed')
+      : all.filter((s) => s.verification?.state !== 'rejected_final')
+    if (all.length > 0) {
       const sorted = [...sms].sort((a, b) => a.segmentIndex - b.segmentIndex)
       const regions: MatchRegion[] = []
       let group: SegmentMatch[] = []
@@ -1440,9 +1517,11 @@ class Scheduler {
 
     if (sms.length > 0) {
       // Live-verified path: derive each region's verdict from its segments' 24fps results.
-      addLog(scan, 'info', `Regions built from the live-verified segment map: ${regions.length} region(s)`)
+      addLog(scan, 'info', `Regions built from the live-verified segment map: ${regions.length} region(s) — CONFIRMED segments only`)
       const rejectedCount = sms.filter((s) => s.verification?.state === 'rejected_final').length
+      const pendingCount = sms.filter((s) => s.verification && !['confirmed', 'rejected_final'].includes(s.verification.state)).length
       if (rejectedCount > 0) addLog(scan, 'warn', `${rejectedCount} segment(s) rejected by the 24fps verifier are EXCLUDED from final regions`)
+      if (pendingCount > 0) addLog(scan, 'warn', `${pendingCount} unverified (pending) segment(s) are EXCLUDED from final regions — only 24fps-CONFIRMED matches count`)
       for (const region of regions) {
         const segs = (region.segmentIndexes || []).map((i) => sms.find((s) => s.segmentIndex === i)).filter(Boolean) as SegmentMatch[]
         const confirmed = segs.filter((s) => s.verification?.state === 'confirmed')

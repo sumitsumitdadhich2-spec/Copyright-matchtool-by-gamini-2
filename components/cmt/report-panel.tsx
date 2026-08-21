@@ -53,7 +53,9 @@ export function ReportPanel({ scan }: { scan: Scan }) {
                   <th className="py-1 pr-2 font-medium">Movie (exact)</th>
                   <th className="py-1 pr-2 font-medium">Duration</th>
                   <th className="py-1 pr-2 font-medium">Speed</th>
-                  <th className="py-1 pr-2 font-medium">Conf</th>
+                  <th className="py-1 pr-2 font-medium" title="verifier confidence when verified; * = raw scanner confidence (unverified)">
+                    Conf
+                  </th>
                   <th className="py-1 pr-2 font-medium">Model</th>
                   <th className="py-1 font-medium">Verification</th>
                 </tr>
@@ -74,7 +76,17 @@ export function ReportPanel({ scan }: { scan: Scan }) {
                         </td>
                         <td className="py-1 pr-2">{(s.movieEnd - s.movieStart).toFixed(3)}s</td>
                         <td className="py-1 pr-2">{s.speed}</td>
-                        <td className="py-1 pr-2">{s.confidence}</td>
+                        <td className="py-1 pr-2">
+                          {s.verification?.confidence !== undefined ? (
+                            <span className={s.verification.state === 'confirmed' ? 'text-success' : 'text-destructive'}>
+                              {s.verification.confidence}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground" title="scanner confidence — not yet verified">
+                              {s.confidence}*
+                            </span>
+                          )}
+                        </td>
                         <td className="py-1 pr-2 text-muted-foreground">{s.model.replace('gemini-', '')}</td>
                         <td className="py-1">
                           <span className={`rounded-full px-2 py-0.5 text-[11px] ${badge.cls}`}>{badge.label}</span>
