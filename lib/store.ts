@@ -36,30 +36,51 @@ function writeJSON(file: string, data: unknown) {
 
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json')
 
+/** Up to 5 Gemini API keys. Key 1 is required; 2-5 are optional parallel workers. */
+export const MAX_API_KEYS = 5
+
 interface Settings {
   apiKey?: string
   apiKey2?: string
+  apiKey3?: string
+  apiKey4?: string
+  apiKey5?: string
+}
+
+function keyField(n: number): keyof Settings {
+  return (n === 1 ? 'apiKey' : `apiKey${n}`) as keyof Settings
+}
+
+/** Read API key for slot n (1-5). Slot 1 keeps the legacy `apiKey` field name. */
+export function getApiKeyN(n: number): string | null {
+  const s = readJSON<Settings>(SETTINGS_FILE, {})
+  return (s[keyField(n)] as string | undefined) || null
 }
 
 export function getApiKey(): string | null {
-  const s = readJSON<Settings>(SETTINGS_FILE, {})
-  return s.apiKey || null
+  return getApiKeyN(1)
 }
 
-/** Second API key (Verifier lane). Optional — verification falls back to key 1 when absent. */
-export function getApiKey2(): string | null {
-  const s = readJSON<Settings>(SETTINGS_FILE, {})
-  return s.apiKey2 || null
+/** All configured keys in slot order, de-duplicated (a repeated key gives no extra quota). */
+export function getAllApiKeys(): string[] {
+  const out: string[] = []
+  for (let n = 1; n <= MAX_API_KEYS; n++) {
+    const k = getApiKeyN(n)
+    if (k && !out.includes(k)) out.push(k)
+  }
+  return out
 }
 
-export function setApiKey(apiKey: string) {
+export function setApiKeyN(n: number, key: string) {
   const s = readJSON<Settings>(SETTINGS_FILE, {})
-  writeJSON(SETTINGS_FILE, { ...s, apiKey })
+  writeJSON(SETTINGS_FILE, { ...s, [keyField(n)]: key })
 }
 
-export function setApiKey2(apiKey2: string) {
+/** Remove the key in slot n (slot 1 can also be cleared, but scanning then stops working). */
+export function clearApiKeyN(n: number) {
   const s = readJSON<Settings>(SETTINGS_FILE, {})
-  writeJSON(SETTINGS_FILE, { ...s, apiKey2 })
+  delete s[keyField(n)]
+  writeJSON(SETTINGS_FILE, s)
 }
 
 export function apiKeyHash(apiKey: string): string {

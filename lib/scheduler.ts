@@ -16,8 +16,7 @@ import {
   getScan,
   saveScan,
   addLog,
-  getApiKey,
-  getApiKey2,
+  getAllApiKeys,
   getModelUsage,
   incrementModelUsage,
   setModelExhausted,
@@ -43,10 +42,11 @@ import {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** One API key lane. Lane 1 = Main Scanner key, Lane 2 = Verifier key.
+/** One API key lane (1-5). Lane 1 = Main Scanner key; lanes 2+ are parallel workers
+ *  that prefer verification work but pick up scan chunks whenever they are free.
  *  Gemini Files API uploads are PER KEY, so each lane keeps its own short-video URI. */
 interface KeyLane {
-  idx: 1 | 2
+  idx: number
   apiKey: string
   ai: GoogleGenAI
   shortUri: string | null
@@ -96,9 +96,8 @@ class Scheduler {
 
   async start(scanId: string, resume: boolean): Promise<{ ok: boolean; error?: string }> {
     if (this.jobs.has(scanId)) return { ok: false, error: 'Scan already running' }
-    const apiKey = getApiKey()
-    if (!apiKey) return { ok: false, error: 'No Gemini API key configured. Add it in Settings first.' }
-    const apiKey2 = getApiKey2()
+    const apiKeys = getAllApiKeys()
+    if (apiKeys.length === 0) return { ok: false, error: 'No Gemini API key configured. Add it in Settings first.' }
     const scan = getScan(scanId)
     if (!scan) return { ok: false, error: 'Scan not found' }
     if (!scan.shortDuration || !scan.movieDuration || scan.chunkCount === 0) {
@@ -134,10 +133,15 @@ class Scheduler {
     scan.error = null
     if (!scan.startedAt) scan.startedAt = Date.now()
 
-    const lanes: KeyLane[] = [{ idx: 1, apiKey, ai: getClient(apiKey), shortUri: null, shortUriPromise: null }]
-    if (apiKey2 && apiKey2 !== apiKey) {
-      lanes.push({ idx: 2, apiKey: apiKey2, ai: getClient(apiKey2), shortUri: null, shortUriPromise: null })
-    }
+    // One lane per configured key (1-5, already de-duplicated). Work is shared across
+    // ALL lanes: every key scans chunks first, then every key runs verification.
+    const lanes: KeyLane[] = apiKeys.map((k, i) => ({
+      idx: i + 1,
+      apiKey: k,
+      ai: getClient(k),
+      shortUri: null,
+      shortUriPromise: null,
+    }))
 
     addLog(
       scan,
@@ -146,9 +150,13 @@ class Scheduler {
         ? `Resuming: ${queue.length} chunk(s) + ${verifyQueue.length} verification(s) pending`
         : `Scan started: ${queue.length} chunks queued across ${MODEL_POOL.length} models × ${lanes.length} API key(s)`,
     )
-    if (lanes.length === 2)
-      addLog(scan, 'info', 'Key 2 (Verifier) active — BOTH keys scan all chunks first, then BOTH keys run 24fps verification in confidence order')
-    else addLog(scan, 'warn', 'No Key 2 set — Key 1 will scan all chunks first, then handle 24fps verification')
+    if (lanes.length > 1)
+      addLog(
+        scan,
+        'info',
+        `${lanes.length} API keys active — ALL keys scan chunks in parallel first, then ALL keys run 24fps verification in confidence order`,
+      )
+    else addLog(scan, 'warn', 'Only 1 API key set — it will scan all chunks first, then handle 24fps verification. Add more keys (up to 5) for parallel speed.')
 
     const job: Job = {
       scan,
@@ -204,9 +212,9 @@ class Scheduler {
   }
 
   /** modelStates key: lane 1 uses the plain model id (drives the Model Pool board);
-   *  lane 2 keeps its own suffixed entry so the two keys never overwrite each other. */
+   *  lanes 2-5 keep their own suffixed entries so keys never overwrite each other. */
   private stateKey(lane: KeyLane, m: ModelSpec) {
-    return lane.idx === 1 ? m.id : `${m.id}@2`
+    return lane.idx === 1 ? m.id : `${m.id}@${lane.idx}`
   }
 
   private rateKey(lane: KeyLane, m: ModelSpec) {
@@ -260,7 +268,7 @@ class Scheduler {
     this.mark(job)
 
     // One worker per (key lane × model), all pulling from the shared queues in parallel.
-    // Lane 1 prefers scan chunks, lane 2 prefers verifications — whichever is free
+    // Lane 1 prefers scan chunks, lanes 2-5 prefer verifications — whichever is free
     // picks up whatever work is left, so no key ever sits idle.
     const workers: Promise<void>[] = []
     for (const lane of job.lanes) {
@@ -401,7 +409,7 @@ class Scheduler {
   }
 
   /** Unified worker: one per (key lane × model). Picks work by lane priority —
-   *  lane 1: scan chunks first, then verifications; lane 2: verifications first,
+   *  lane 1: scan chunks first, then verifications; lanes 2-5: verifications first,
    *  then scan chunks. Exits only when BOTH queues are fully drained. */
   private async worker(job: Job, lane: KeyLane, m: ModelSpec) {
     const { scan } = job
@@ -453,7 +461,7 @@ class Scheduler {
       let verifyTask: VerifyTask | null = null
       let chunkIndex: number | undefined
 
-      if (lane.idx === 2) {
+      if (lane.idx >= 2) {
         if (canVerify) verifyTask = this.dequeueVerify(job)
         else if (canScan) chunkIndex = job.queue.shift()
       } else {
