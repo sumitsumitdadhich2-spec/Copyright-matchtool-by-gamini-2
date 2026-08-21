@@ -58,6 +58,10 @@ interface KeyLane {
 interface VerifyTask {
   kind: 'verify' | 'rescan'
   segmentIndex: number
+  /** rescan tasks only: WHICH candidate source chunk to rescan at 24fps */
+  chunkIndex?: number
+  /** confidence of the candidate that spawned this task — drives queue ordering */
+  confidence?: number
 }
 
 interface Job {
@@ -68,7 +72,8 @@ interface Job {
   inFlight: Set<number>
   /** live verification task queue (verify @24fps / rescan @24fps) */
   verifyQueue: VerifyTask[]
-  verifyInFlight: Set<number>
+  /** keys of tasks currently running (see taskKey) — multiple tasks per segment allowed */
+  verifyInFlight: Set<string>
   /** transient error counter per segment so a flaky segment can't loop forever */
   verifyErrors: Record<number, number>
   stopping: boolean
@@ -111,8 +116,18 @@ class Scheduler {
       const v = sm.verification
       if (!v) continue
       if (v.state === 'verifying') v.state = 'pending'
-      if (v.state === 'pending') verifyQueue.push({ kind: 'verify', segmentIndex: sm.segmentIndex })
-      else if (v.state === 'rescanning') verifyQueue.push({ kind: 'rescan', segmentIndex: sm.segmentIndex })
+      if (v.state === 'pending') {
+        verifyQueue.push({ kind: 'verify', segmentIndex: sm.segmentIndex, confidence: sm.confidence })
+      } else if (v.state === 'rescanning') {
+        // One rescan task PER pending source chunk (confidence-ordered pipeline).
+        const chunks =
+          sm.rescanChunksPending && sm.rescanChunksPending.length > 0 ? [...sm.rescanChunksPending] : [sm.chunkIndex]
+        sm.rescanChunksPending = [...chunks]
+        for (const ci of chunks) {
+          const conf = (sm.candidateHistory || []).find((h) => h.chunkIndex === ci)?.confidence ?? sm.confidence
+          verifyQueue.push({ kind: 'rescan', segmentIndex: sm.segmentIndex, chunkIndex: ci, confidence: conf })
+        }
+      }
     }
 
     if (queue.length === 0 && verifyQueue.length === 0 && scan.status !== 'stopped') {
@@ -135,8 +150,9 @@ class Scheduler {
         ? `Resuming: ${queue.length} chunk(s) + ${verifyQueue.length} verification(s) pending`
         : `Scan started: ${queue.length} chunks queued across ${MODEL_POOL.length} models × ${lanes.length} API key(s)`,
     )
-    if (lanes.length === 2) addLog(scan, 'info', 'Key 2 (Verifier) active — live 24fps verification runs in parallel; free keys share all work')
-    else addLog(scan, 'warn', 'No Key 2 set — Key 1 will also handle 24fps verification when it is free')
+    if (lanes.length === 2)
+      addLog(scan, 'info', 'Key 2 active — SCAN-FIRST mode: both keys scan ALL chunks first, then both run 24fps verification in confidence order')
+    else addLog(scan, 'warn', 'No Key 2 set — Key 1 will scan all chunks first, then run 24fps verification')
 
     const job: Job = {
       scan,
@@ -346,11 +362,50 @@ class Scheduler {
     this.jobs.delete(job.scan.id)
   }
 
-  /** Queue a segment for live 24fps verification (idempotent — never double-queues). */
-  private enqueueVerify(job: Job, segmentIndex: number, kind: VerifyTask['kind'] = 'verify') {
-    if (job.verifyInFlight.has(segmentIndex)) return
-    if (job.verifyQueue.some((t) => t.segmentIndex === segmentIndex)) return
-    job.verifyQueue.push({ kind, segmentIndex })
+  /** Unique key for one verification task (kind + segment + rescan source chunk). */
+  private taskKey(t: VerifyTask) {
+    return `${t.kind}:${t.segmentIndex}:${t.kind === 'rescan' ? (t.chunkIndex ?? -1) : 'p'}`
+  }
+
+  /** Queue a verification task (idempotent — never double-queues the same task). */
+  private enqueueVerify(job: Job, task: VerifyTask) {
+    const key = this.taskKey(task)
+    if (job.verifyInFlight.has(key)) return
+    if (job.verifyQueue.some((t) => this.taskKey(t) === key)) return
+    job.verifyQueue.push(task)
+  }
+
+  /** Drop every queued task for a segment — called the MOMENT one candidate is CONFIRMED,
+   *  so pending rescans/verifies for that segment never burn quota. Returns dropped count. */
+  private cancelSegmentTasks(job: Job, segmentIndex: number): number {
+    const before = job.verifyQueue.length
+    job.verifyQueue = job.verifyQueue.filter((t) => t.segmentIndex !== segmentIndex)
+    return before - job.verifyQueue.length
+  }
+
+  /** Pick the next verification task by priority: plain verifies before rescans (a quick
+   *  CONFIRM cancels that segment's pending rescans and saves quota), then higher
+   *  candidate confidence first — the most confident match is always verified first. */
+  private takeVerifyTask(job: Job): VerifyTask | null {
+    if (job.verifyQueue.length === 0) return null
+    const score = (t: VerifyTask) => {
+      const sm = (job.scan.segmentMatches || []).find((s) => s.segmentIndex === t.segmentIndex)
+      const conf = t.confidence ?? sm?.confidence ?? 0
+      return (t.kind === 'verify' ? 1000 : 0) + conf
+    }
+    let best = 0
+    for (let i = 1; i < job.verifyQueue.length; i++) {
+      if (score(job.verifyQueue[i]) > score(job.verifyQueue[best])) best = i
+    }
+    return job.verifyQueue.splice(best, 1)[0]
+  }
+
+  /** Remember that CHUNK produced a candidate for this segment at CONF (dedup, keep max). */
+  private recordCandidate(sm: SegmentMatch, chunkIndex: number, confidence: number) {
+    if (!sm.candidateHistory) sm.candidateHistory = []
+    const e = sm.candidateHistory.find((h) => h.chunkIndex === chunkIndex)
+    if (e) e.confidence = Math.max(e.confidence, confidence)
+    else sm.candidateHistory.push({ chunkIndex, confidence })
   }
 
   /** True when the scan phase is fully finished (no chunks queued or in flight). */
@@ -391,18 +446,21 @@ class Scheduler {
       }
       st.cooldownUntil = null
 
-      // ----- Work selection (per-lane priority, free key takes any pending work) -----
+      // ----- Work selection: SCAN-FIRST. BOTH keys scan chunks until every chunk is
+      // done, and only THEN do both keys run 24fps verification (confidence-ordered).
+      // If a rejection later re-queues chunks, scanning resumes before verification. -----
       const canScan = job.queue.length > 0
-      const canVerify = job.verifyQueue.length > 0
+      const canVerify = !canScan && this.scanPhaseDone(job) && job.verifyQueue.length > 0
       let verifyTask: VerifyTask | null = null
       let chunkIndex: number | undefined
 
-      if (lane.idx === 2) {
-        if (canVerify) verifyTask = job.verifyQueue.shift() || null
-        else if (canScan) chunkIndex = job.queue.shift()
-      } else {
-        if (canScan) chunkIndex = job.queue.shift()
-        else if (canVerify) verifyTask = job.verifyQueue.shift() || null
+      if (canScan) {
+        chunkIndex = job.queue.shift()
+        // Claim immediately — scanPhaseDone() must not flip true while this chunk is
+        // still being prepared (rate-limit waits happen before the request is sent).
+        if (chunkIndex !== undefined) job.inFlight.add(chunkIndex)
+      } else if (canVerify) {
+        verifyTask = this.takeVerifyTask(job)
       }
 
       // ----- Per-chunk segment selection -----
@@ -423,6 +481,7 @@ class Scheduler {
             const c = scan.chunks[chunkIndex]
             c.status = 'cancelled'
             c.excludedSegments = lockedIdx
+            job.inFlight.delete(chunkIndex)
             addLog(scan, 'info', `chunk ${chunkIndex} skipped — all segments locked (conf 100 / 24fps-confirmed); will re-queue if the verifier rejects one`)
             this.mark(job)
             continue
@@ -463,7 +522,10 @@ class Scheduler {
           remaining -= step
         }
         if (job.stopping) {
-          if (chunkIndex !== undefined) job.queue.unshift(chunkIndex)
+          if (chunkIndex !== undefined) {
+            job.queue.unshift(chunkIndex)
+            job.inFlight.delete(chunkIndex)
+          }
           if (verifyTask) job.verifyQueue.unshift(verifyTask)
           return
         }
@@ -561,7 +623,8 @@ class Scheduler {
               const sameWindow = (aS: number, aE: number, bS: number, bE: number) => Math.abs(aS - bS) <= 0.25 && Math.abs(aE - bE) <= 0.25
               if (!existing) {
                 scan.segmentMatches.push(sm)
-                this.enqueueVerify(job, sm.segmentIndex)
+                this.recordCandidate(sm, idx, x.confidence)
+                this.enqueueVerify(job, { kind: 'verify', segmentIndex: sm.segmentIndex, confidence: sm.confidence })
               } else if (existing.verification?.state === 'confirmed') {
                 // ORDER SAFETY: a frame-verified mapping is LOCKED — never replaced by a
                 // later unverified claim, even at higher scan confidence.
@@ -591,15 +654,24 @@ class Scheduler {
                     chunkIndex: existing.chunkIndex,
                   })
                 }
+                const prevHistory = existing.candidateHistory
+                const prevRejected = existing.rejectedWindows
+                const prevRescanned = existing.rescannedChunks
                 Object.assign(existing, sm)
-                // Object.assign copies sm's fresh verification too — restore the real
-                // state unless the mapping actually changed (or was rejected before).
+                // Object.assign copies sm's fresh bookkeeping too — restore accumulated records.
+                existing.candidateHistory = prevHistory
+                existing.rejectedWindows = prevRejected
+                existing.rescannedChunks = prevRescanned
+                this.recordCandidate(existing, idx, x.confidence)
+                // Restore the real verification state unless the mapping actually changed
+                // (or was rejected before).
                 if (windowChanged || wasRejected) {
-                  existing.verification = { state: 'pending', attempts: 0 }
+                  existing.verification = { state: 'pending', attempts: prevVerification?.attempts || 0 }
                 } else {
                   existing.verification = prevVerification
                 }
-                if (existing.verification?.state === 'pending') this.enqueueVerify(job, sm.segmentIndex)
+                if (existing.verification?.state === 'pending')
+                  this.enqueueVerify(job, { kind: 'verify', segmentIndex: sm.segmentIndex, confidence: sm.confidence })
               } else {
                 // SUSPECT-CONFIDENCE RULE: any accepted match below conf 100 stays suspect,
                 // so equal/lower-confidence windows found in LATER chunks are kept as
@@ -617,6 +689,7 @@ class Scheduler {
                     chunkIndex: sm.chunkIndex,
                   })
                   if (added) {
+                    this.recordCandidate(existing, idx, sm.confidence)
                     addLog(
                       scan,
                       'info',

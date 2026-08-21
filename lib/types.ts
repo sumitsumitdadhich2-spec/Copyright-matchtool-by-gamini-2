@@ -88,6 +88,13 @@ export interface SegmentMatch {
   alternates?: SegmentAlternate[]
   /** all movie windows the verifier has finally rejected for this segment — never re-tried */
   rejectedWindows?: [number, number][]
+  /** every chunk that ever produced a candidate window for this segment, with the
+   *  confidence it was found at — drives the confidence-ordered rescan queue */
+  candidateHistory?: { chunkIndex: number; confidence: number }[]
+  /** chunks queued for a 24fps rescan of this segment that have not completed yet */
+  rescanChunksPending?: number[]
+  /** chunks already rescanned at 24fps for this segment — never rescanned twice */
+  rescannedChunks?: number[]
 }
 
 /** An alternative candidate window for a segment, found in a different chunk while
