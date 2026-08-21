@@ -8,6 +8,7 @@ import {
   MODEL_MIN_INTERVAL_MS,
   RATE_COOLDOWN_MS,
   CONFIDENCE_THRESHOLD,
+  VERIFY_CONFIRM_THRESHOLD,
   CHUNK_SECONDS,
   SEGMENT_FPS,
   type ModelSpec,
@@ -899,7 +900,7 @@ class Scheduler {
         // Release the in-flight key BEFORE follow-up enqueues (they dedupe by key).
         job.verifyInFlight.delete(tKey)
 
-        if (res.verdict === 'CONFIRM' && res.confidence >= CONFIDENCE_THRESHOLD) {
+        if (res.verdict === 'CONFIRM' && res.confidence >= VERIFY_CONFIRM_THRESHOLD) {
           sm.verification.state = 'confirmed'
           sm.verification.note = res.note
           sm.verification.reason = undefined
@@ -1493,7 +1494,7 @@ class Scheduler {
         void deleteFileQuiet(lane.ai, mu.name)
 
         region.verified = {
-          match: result.match && result.confidence >= CONFIDENCE_THRESHOLD,
+          match: result.match && result.confidence >= VERIFY_CONFIRM_THRESHOLD,
           confidence: result.confidence,
           model: model.id,
           note: result.note,

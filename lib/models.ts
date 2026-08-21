@@ -28,6 +28,11 @@ export const RATE_COOLDOWN_MS = 60_000
 /** Accept a segment/chunk match only at or above this confidence (strict: >= 90). */
 export const CONFIDENCE_THRESHOLD = 90
 
+/** A verifier CONFIRM is accepted ONLY at or above this confidence (ultra-strict: >= 97).
+ * A CONFIRM is treated as ground truth and shown to the user as a legal copyright match,
+ * so it demands near-certainty — anything less is downgraded to REJECT server-side. */
+export const VERIFY_CONFIRM_THRESHOLD = 97
+
 /** fps used for the one-time short-video segmentation pass (locked).
  * 24 fps × 60s = 1,440 frames × 65 tok/frame ≈ 93.6K tokens — fits under the 250K TPM cap at default resolution. */
 export const SEGMENT_FPS = 24
