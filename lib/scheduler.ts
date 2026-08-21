@@ -889,7 +889,7 @@ class Scheduler {
         remoteNames.push(su.name)
         const mu = await uploadVideo(lane.ai, movieClip)
         remoteNames.push(mu.name)
-        const res = await liveVerifyRequest(lane.ai, m.id, su.uri, mu.uri)
+        const res = await liveVerifyRequest(lane.ai, m.id, su.uri, mu.uri, sm.shortEnd - sm.shortStart)
         this.recordChunkOutput(scan.chunks[sm.chunkIndex], 'verify', m.id, res.raw, sm.segmentIndex)
 
         sm.verification.attempts += 1
@@ -904,7 +904,16 @@ class Scheduler {
           sm.verification.state = 'confirmed'
           sm.verification.note = res.note
           sm.verification.reason = undefined
-          addLog(scan, 'success', `S${sm.segmentIndex} CONFIRMED @24fps conf ${res.confidence} (${m.id}, key ${lane.idx}) — ${res.note.slice(0, 100)}`)
+          const fmtT = (sec: number) => {
+            const mm = Math.floor(sec / 60)
+            const ss = sec - mm * 60
+            return `${String(mm).padStart(2, '0')}:${ss.toFixed(3).padStart(6, '0')}`
+          }
+          addLog(
+            scan,
+            'success',
+            `S${sm.segmentIndex} CONFIRMED @24fps conf ${res.confidence} — short ${fmtT(sm.shortStart)}-${fmtT(sm.shortEnd)} ↔ movie ${fmtT(sm.movieStart)}-${fmtT(sm.movieEnd)} (${(sm.shortEnd - sm.shortStart).toFixed(3)}s mapped, ${m.id}, key ${lane.idx}) — ${res.note.slice(0, 100)}`,
+          )
           // First CONFIRM wins — instantly cancel every other candidate/rescan for this segment.
           this.onSegmentConfirmed(job, sm)
         } else {

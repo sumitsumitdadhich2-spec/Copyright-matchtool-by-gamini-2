@@ -308,10 +308,12 @@ Video 2 is a ONE-MINUTE CHUNK taken from a full movie.
 Does any part of the short video appear in this movie chunk as the EXACT SAME RECORDING (same take, frame for frame)? Compare the actual frames: scenes, people, poses, actions, camera shots, background details, and audio (same dialogue words at the same offsets).
 
 YOUR DEFAULT ANSWER IS "NO MATCH". Report a match ONLY when frame-level evidence compels you:
-- Same actors / same location / similar framing is NOT a match — movies are full of similar-looking moments and alternate takes. A different moment of the same scene must be reported as NO match.
+- SIMILAR IS NOT SAME. Same actors / same location / same costumes / similar framing is NOT a match — movies are full of similar-looking moments and alternate takes. A different moment of the same scene must be reported as NO match.
 - Never guess or answer from overall plot similarity. If you cannot point to identical start frames, identical end frames, and identical action timing, it is NOT a match.
 - The time ranges you report must be read off each video's OWN timeline by actually locating the frames — never invented, never copied from one video to the other.
-- A false positive is far worse than a miss. When in doubt: {"match": false}.
+- One hard contradiction (a mismatched frame, a missing gesture, a different background object) outweighs any number of similarities — reject immediately.
+- If the footage is too dark/blurry/short to verify frame identity, that is NOT a match — unverifiable = no match.
+- A false positive is far worse than a miss. There is NO penalty for missing — a strict verifier re-checks everything you report, and every false positive you emit wastes an expensive verification pass. When in doubt: {"match": false}.
 
 Answer in strict JSON, nothing else:
 {"match": true or false, "confidence": 0-100, "short_segment": "mm:ss-mm:ss", "chunk_segment": "mm:ss-mm:ss", "matched_segments": "e.g. S1, S3 or empty", "note": "one short sentence citing concrete frame evidence"}
@@ -643,6 +645,10 @@ export interface LiveVerifyResult {
   checks?: Partial<LiveVerifyChecks>
   /** concrete fingerprints the model claims to have verified in BOTH clips */
   fingerprints?: string[]
+  /** exact matched extent WITHIN the short clip [start, end] seconds (CONFIRM only) */
+  matchedV1?: [number, number] | null
+  /** exact matched extent WITHIN the movie clip [start, end] seconds (CONFIRM only) */
+  matchedV2?: [number, number] | null
   /** detailed visual reason — REQUIRED on REJECT (what differs: scene, subjects, motion, timing...) */
   reason: string
   note: string
@@ -654,6 +660,13 @@ const LIVE_VERIFY_PROMPT = `You are the FINAL, INDEPENDENT, ADVERSARIAL VERIFIER
 Video 1 = a segment cut from a SHORT VIDEO. Video 2 = the window cut from a MOVIE where an earlier scan CLAIMS the same footage sits.
 
 YOUR STANCE: the claim is GUILTY OF BEING FALSE until proven true. Earlier scan models are known to hallucinate matches, echo timestamps without looking at frames, and confuse similar-looking takes. Your ONLY job is to try as hard as possible to DISPROVE the claim. A CONFIRM from you is treated as ground truth by the system and shown to the user as a legal copyright match — a wrong CONFIRM is the worst possible failure. A wrong REJECT merely triggers another search. When ANY doubt remains: REJECT.
+
+IRON RULES (these override everything else):
+- SIMILAR IS NOT SAME. Same movie, same scene, same actors, same location, same costumes, same topic of dialogue — NONE of that is evidence. Only frame-level identity counts: the SAME recording, the SAME take, the SAME moment. If you catch yourself thinking "it's clearly the same scene" — that thought is worthless; only "frame N shows the identical pose/object/text in both clips" counts.
+- Every "pass" you output MUST be backed by concrete evidence written in your observations. A pass you cannot justify with named specifics (which object, which position, which offset) is a FAIL.
+- If ANY phase below cannot be completed properly (clip too dark, too blurry, too short, content unclear, frames unreadable) you MUST REJECT — an unverifiable claim is a false claim.
+- You are graded ONLY on never confirming a false match. There is NO penalty for rejecting a true match — the system will simply search again.
+- NEVER average your way to a verdict. One hard contradiction outweighs any number of similarities: a single mismatched frame, drifting offset, missing gesture, or different background object = REJECT, no matter how similar everything else looks.
 
 If the claim were true, these clips are the SAME recording playing in parallel: frame 1 of Video 1 corresponds to frame 1 of Video 2, and every action, cut and camera move happens at the same time offset in both.
 
@@ -685,7 +698,8 @@ TRAPS THAT HAVE FOOLED VERIFIERS BEFORE (check each explicitly):
 - CONFIRMATION BIAS: you were TOLD these clips should match. Ignore that. Treat them as two random clips until your own frame evidence says otherwise.
 
 VERDICT RULES (ultra-strict):
-- "CONFIRM" ONLY if: ALL applicable tests pass ("audio" may be "na") AND at least THREE concrete fingerprints verified AND the event map aligns within 2 frames AND your difference hunt came up empty. Confidence for a CONFIRM must be 97-100 — if you cannot honestly give 97+, it means doubt remains, so REJECT.
+- "CONFIRM" ONLY if: ALL applicable tests pass ("audio" may be "na") AND at least THREE concrete fingerprints verified AND the event map aligns within 2 frames AND your difference hunt came up empty. Confidence for a CONFIRM must be 98-100 — if you cannot honestly give 98+, it means doubt remains, so REJECT.
+- On CONFIRM you MUST also report the EXACT matched extent: "matched_v1_range" and "matched_v2_range" (mm:ss.mmm-mm:ss.mmm, read off each clip's OWN timeline). Usually the full clips match (0 to end); if only part of the clips is the identical recording, report exactly which part in each clip — and note that partial overlap means the claimed window was misaligned, which is itself grounds to REJECT unless the overlap covers essentially the whole clip.
 - ANY failed test, ANY unverifiable test, ANY doubt → "REJECT". Confidence reflects how sure you are of the rejection.
 - On REJECT, "reason" MUST spell out exactly WHAT is visually different and WHERE: scene, subjects, clothing, motion, timing offset, camera angle, background objects, on-screen text. Never vague — the user reads it.
 - NEVER confirm based on plot, actors, location or overall similarity. Only frame-level identity counts.
@@ -708,6 +722,8 @@ Answer in strict JSON, nothing else:
   },
   "fingerprints_verified": ["concrete detail 1 seen in BOTH clips at the same moment", "concrete detail 2", "concrete detail 3"],
   "difference_hunt": ["candidate difference checked and its outcome", "...at least 3 entries..."],
+  "matched_v1_range": "mm:ss.mmm-mm:ss.mmm (exact matched extent within Video 1; empty string on REJECT)",
+  "matched_v2_range": "mm:ss.mmm-mm:ss.mmm (exact matched extent within Video 2; empty string on REJECT)",
   "reason": "detailed visual reason (mandatory on REJECT, empty string on CONFIRM)",
   "note": "one-line summary citing the strongest single piece of evidence"
 }`
@@ -719,6 +735,8 @@ export async function liveVerifyRequest(
   model: string,
   shortClipUri: string,
   movieClipUri: string,
+  /** expected clip duration in seconds — used to validate the reported matched extent */
+  expectedDuration?: number,
 ): Promise<LiveVerifyResult> {
   try {
     const resp = await ai.models.generateContent({
@@ -743,6 +761,8 @@ export async function liveVerifyRequest(
       video2_observation?: unknown
       event_map?: unknown
       difference_hunt?: unknown
+      matched_v1_range?: unknown
+      matched_v2_range?: unknown
     }
     const parsed = tolerantJsonParse<RawLiveVerify>(extractJsonBlock(text))
     let verdict: 'CONFIRM' | 'REJECT' = String(parsed.verdict || '').toUpperCase() === 'CONFIRM' ? 'CONFIRM' : 'REJECT'
@@ -800,7 +820,10 @@ export async function liveVerifyRequest(
     //  3. independent observations of BOTH clips must be present and substantial
     //  4. an event sync map with >= 3 events must be present, offsets aligned within 0.15s
     //  5. a difference hunt with >= 3 checked candidates must be present
-    //  6. confidence must be >= 97 (a CONFIRM below that means doubt remained)
+    //  6. confidence must be >= 98 (a CONFIRM below that means doubt remained)
+    //  7. the matched extent must be reported and must cover (essentially) the whole clip
+    const matchedV1 = parseSegment(String(parsed.matched_v1_range || ''))
+    const matchedV2 = parseSegment(String(parsed.matched_v2_range || ''))
     if (verdict === 'CONFIRM') {
       const mandatory: (keyof LiveVerifyChecks)[] = ['first_frame', 'last_frame', 'parallel_timeline', 'fingerprints']
       const failed = mandatory.filter((k) => checks[k] !== 'pass')
@@ -819,7 +842,20 @@ export async function liveVerifyRequest(
           `event map contradicts CONFIRM — misaligned event(s): ${misaligned.map((e) => `"${e.event.slice(0, 40)}" v1@${e.v1}s vs v2@${e.v2}s`).join('; ')}`,
         )
       if (diffHunt.length < 3) problems.push(`difference hunt has only ${diffHunt.length} checked candidate(s) (3 required)`)
-      if (confidence < 97) problems.push(`confidence ${confidence} < 97 — a CONFIRM with residual doubt is not accepted`)
+      if (confidence < 98) problems.push(`confidence ${confidence} < 98 — a CONFIRM with residual doubt is not accepted`)
+      if (!matchedV1 || !matchedV2) {
+        problems.push('matched extent (matched_v1_range/matched_v2_range) missing or unparseable — no proof of WHERE the clips match')
+      } else if (expectedDuration && expectedDuration > 0.5) {
+        // The extents must cover essentially the whole clip and be equally long.
+        const cov1 = (matchedV1[1] - matchedV1[0]) / expectedDuration
+        const cov2 = (matchedV2[1] - matchedV2[0]) / expectedDuration
+        if (cov1 < 0.85 || cov2 < 0.85)
+          problems.push(
+            `matched extent covers only ${(Math.min(cov1, cov2) * 100).toFixed(0)}% of the clip — a partial overlap means the claimed window is misaligned`,
+          )
+        if (Math.abs((matchedV1[1] - matchedV1[0]) - (matchedV2[1] - matchedV2[0])) > 0.5)
+          problems.push('matched extents in the two clips have different durations — same recording must match for the same length')
+      }
       if (problems.length > 0) {
         verdict = 'REJECT'
         reason = `SERVER OVERRIDE — model said CONFIRM but evidence is insufficient: ${problems.join('; ')}. ${reason}`.trim()
@@ -831,6 +867,8 @@ export async function liveVerifyRequest(
       confidence,
       checks,
       fingerprints,
+      matchedV1,
+      matchedV2,
       reason,
       note: String(parsed.note || ''),
       raw: text,
@@ -1006,9 +1044,9 @@ export function enforceSegmentDurations(result: ChunkScanResult, segments: Short
   return { match: valid.length > 0, confidence, valid, dropped }
 }
 
-/** Parse "mm:ss-mm:ss" (or h:mm:ss) into seconds tuple. Returns null when unparseable. */
+/** Parse "mm:ss-mm:ss" (or h:mm:ss / mm:ss.mmm) into seconds tuple. Returns null when unparseable. */
 export function parseSegment(s: string): [number, number] | null {
-  const m = s.match(/(\d+(?::\d+){1,2})\s*[-–]\s*(\d+(?::\d+){1,2})/)
+  const m = s.match(/(\d+(?::\d+){1,2}(?:\.\d+)?)\s*[-–]\s*(\d+(?::\d+){1,2}(?:\.\d+)?)/)
   if (!m) return null
   const toSec = (t: string) => {
     const p = t.split(':').map(Number)
