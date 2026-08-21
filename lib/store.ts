@@ -190,7 +190,8 @@ export function listScans(): ScanSummary[] {
       movieName: s.movieName,
       shortName: s.shortName,
       movieDuration: s.movieDuration,
-      matchCount: s.regions.length || s.candidates.length,
+      // Finished scans count ONLY final (verifier-gated) regions — never raw candidates.
+      matchCount: s.report ? s.regions.length : s.regions.length || s.candidates.length,
       finishedAt: s.finishedAt,
     })
   }

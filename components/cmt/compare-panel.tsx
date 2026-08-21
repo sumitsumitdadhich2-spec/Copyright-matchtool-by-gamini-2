@@ -242,7 +242,11 @@ export function ComparePanel({ scan }: { scan: Scan }) {
         >
           <RotateCcw className="size-3.5" aria-hidden /> Restart segment
         </button>
-        <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">scan conf {pair.confidence}</span>
+        <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">
+          {pair.verification?.confidence !== undefined
+            ? `verifier conf ${pair.verification.confidence}${pair.verification.state === 'confirmed' ? '' : ' (rejected/pending)'}`
+            : `scan conf ${pair.confidence} (unverified)`}
+        </span>
       </div>
       {pair.verification?.state === 'rejected_final' && pair.verification.reason && (
         <p className="mt-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs leading-relaxed text-destructive">
