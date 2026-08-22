@@ -1,72 +1,20 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Pause, Play, RotateCcw, SplitSquareHorizontal } from 'lucide-react'
-import type { Scan, SegmentVerification } from '@/lib/types'
+import type { Scan } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
 
-/** One comparable pair: a short-video time range mapped to a movie time range of equal duration. */
-interface ComparePair {
-  id: string
-  label: string
-  shortStart: number
-  shortEnd: number
-  movieStart: number
-  movieEnd: number
-  confidence: number
-  speed?: string
-  verified?: { match: boolean; confidence: number; note?: string }
-  /** live 2-key verification state for this segment */
-  verification?: SegmentVerification
-}
-
-/** Side-by-side preview of matched timelapses. When the frame-by-frame segment map exists,
- *  every segment (S1, S2, ...) is its own pair with EXACTLY equal durations on both sides.
- *  Falls back to merged regions for legacy scans. */
+/** Side-by-side preview of matched windows: each parsed "Short X --> Movie Y" line
+ *  is one pair with (near-)equal durations on both sides. */
 export function ComparePanel({ scan }: { scan: Scan }) {
-  const pairs = useMemo<ComparePair[]>(() => {
-    const sms = scan.segmentMatches || []
-    if (sms.length > 0) {
-      return [...sms]
-        .sort((a, b) => a.segmentIndex - b.segmentIndex)
-        .map((s) => {
-          const region = scan.regions.find((r) => (r.segmentIndexes || []).includes(s.segmentIndex))
-          return {
-            id: `S${s.segmentIndex}`,
-            label: `S${s.segmentIndex}`,
-            shortStart: s.shortStart,
-            shortEnd: s.shortEnd,
-            movieStart: s.movieStart,
-            movieEnd: s.movieEnd,
-            confidence: s.confidence,
-            speed: s.speed,
-            verification: s.verification,
-            verified: region?.verified
-              ? { match: region.verified.match, confidence: region.verified.confidence, note: region.verified.note }
-              : undefined,
-          }
-        })
-    }
-    return scan.regions.map((r, i) => ({
-      id: r.id,
-      label: `region ${i + 1}`,
-      shortStart: r.shortStart,
-      shortEnd: r.shortEnd,
-      movieStart: r.movieStart,
-      movieEnd: r.movieEnd,
-      confidence: r.maxConfidence,
-      verified: r.verified
-        ? { match: r.verified.match, confidence: r.verified.confidence, note: r.verified.note }
-        : undefined,
-    }))
-  }, [scan.segmentMatches, scan.regions])
-
+  const pairs = scan.matches || []
   const [idx, setIdx] = useState(0)
   const [playing, setPlaying] = useState(false)
   const shortRef = useRef<HTMLVideoElement>(null)
   const movieRef = useRef<HTMLVideoElement>(null)
 
-  const pair: ComparePair | undefined = pairs[Math.min(idx, pairs.length - 1)]
+  const pair = pairs[Math.min(idx, pairs.length - 1)]
 
   // Keep index in range when pairs change between refreshes.
   useEffect(() => {
@@ -87,7 +35,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
       mv.currentTime = pair.movieStart
     }
     setPlaying(false)
-  }, [pair?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pair?.shortStart, pair?.movieStart]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!pair) return null
 
@@ -109,7 +57,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
       mv.pause()
       setPlaying(false)
     } else {
-      // Re-align both to the segment start if either has drifted past the end.
+      // Re-align both to the window start if either has drifted past the end.
       if (sv.currentTime >= pair!.shortEnd - 0.05) sv.currentTime = pair!.shortStart
       if (mv.currentTime >= pair!.movieEnd - 0.05) mv.currentTime = pair!.movieStart
       void sv.play()
@@ -127,48 +75,17 @@ export function ComparePanel({ scan }: { scan: Scan }) {
 
   const src = (kind: 'short' | 'movie') => `/api/scans/${scan.id}/media?kind=${kind}`
   const duration = pair.shortEnd - pair.shortStart
-  const isSegmentMode = (scan.segmentMatches || []).length > 0
 
   return (
     <section aria-label="Side-by-side comparison" className="rounded-lg border border-border bg-card p-4">
       <div className="flex flex-wrap items-center gap-2">
         <SplitSquareHorizontal className="size-4 text-primary" aria-hidden />
-        <h2 className="text-sm font-semibold">{isSegmentMode ? 'Frame-by-Frame Segment Comparison' : 'Side-by-Side Comparison'}</h2>
+        <h2 className="text-sm font-semibold">Side-by-Side Match Comparison</h2>
         <span className="rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">
-          {pair.label} · {idx + 1} / {pairs.length}
+          match {idx + 1} / {pairs.length}
         </span>
-        <span className="rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">{duration.toFixed(3)}s{pair.speed && pair.speed !== '1.0x' ? ` @ ${pair.speed}` : ''}</span>
-        {pair.verification ? (
-          <span
-            className={`rounded-full px-2 py-0.5 font-mono text-xs ${
-              pair.verification.state === 'confirmed'
-                ? 'bg-success/15 text-success'
-                : pair.verification.state === 'rejected_final'
-                  ? 'bg-destructive/15 text-destructive'
-                  : 'bg-secondary text-muted-foreground'
-            }`}
-          >
-            {pair.verification.state === 'confirmed'
-              ? `CONFIRMED @24fps · ${pair.verification.confidence ?? ''}`
-              : pair.verification.state === 'rejected_final'
-                ? 'REJECTED by Verifier (API 2)'
-                : pair.verification.state === 'rescanning'
-                  ? 're-scanning @24fps'
-                  : pair.verification.state === 'verifying'
-                    ? 'verifying @24fps'
-                    : 'pending verification'}
-          </span>
-        ) : (
-          pair.verified && (
-            <span
-              className={`rounded-full px-2 py-0.5 font-mono text-xs ${
-                pair.verified.match ? 'bg-success/15 text-success' : 'bg-destructive/15 text-destructive'
-              }`}
-            >
-              {pair.verified.match ? 'verified match' : 'rejected'} · {pair.verified.confidence}
-            </span>
-          )
-        )}
+        <span className="rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">{duration.toFixed(3)}s</span>
+        <span className="rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">chunk {pair.chunkIndex}</span>
         <div className="ml-auto flex items-center gap-2">
           <button
             type="button"
@@ -240,23 +157,10 @@ export function ComparePanel({ scan }: { scan: Scan }) {
           onClick={restart}
           className="flex items-center gap-1.5 rounded-md border border-input px-3 py-2 text-xs font-medium hover:bg-secondary"
         >
-          <RotateCcw className="size-3.5" aria-hidden /> Restart segment
+          <RotateCcw className="size-3.5" aria-hidden /> Restart match
         </button>
-        <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">
-          {pair.verification?.confidence !== undefined
-            ? `verifier conf ${pair.verification.confidence}${pair.verification.state === 'confirmed' ? '' : ' (rejected/pending)'}`
-            : `scan conf ${pair.confidence} (unverified)`}
-        </span>
+        <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">{pair.model}</span>
       </div>
-      {pair.verification?.state === 'rejected_final' && pair.verification.reason && (
-        <p className="mt-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs leading-relaxed text-destructive">
-          Rejected by Verifier (API 2): {pair.verification.reason}
-        </p>
-      )}
-      {pair.verification?.state === 'confirmed' && pair.verification.note && (
-        <p className="mt-2 text-xs italic text-success">{pair.verification.note}</p>
-      )}
-      {pair.verified?.note && <p className="mt-2 text-xs italic text-muted-foreground">{pair.verified.note}</p>}
     </section>
   )
 }

@@ -1,179 +1,34 @@
 export type ChunkStatus = 'pending' | 'scanning' | 'no_match' | 'match' | 'failed' | 'cancelled'
 
+/** One parsed "Short X --> Movie Y" mapping line from the model's HISSA 2 output. */
+export interface ChunkMatch {
+  /** seconds within the short video */
+  shortStart: number
+  shortEnd: number
+  /** ABSOLUTE seconds within the full movie (chunk offset + local chunk time) */
+  movieStart: number
+  movieEnd: number
+  /** which movie chunk this match was found in */
+  chunkIndex: number
+  model: string
+}
+
+/** Full raw model output captured for a chunk request (for the UI expander). */
+export interface ChunkRawOutput {
+  model: string
+  t: number
+  text: string
+}
+
 export interface ChunkState {
   index: number
   status: ChunkStatus
   model?: string
   attempts: number
-  confidence?: number
-  /** segment indexes that were EXCLUDED from this chunk's scan prompt because they were
-   *  locked (conf 100 or 24fps-confirmed) at scan time. If such a segment is later
-   *  rejected by the verifier, this chunk is re-queued to search for it. */
-  excludedSegments?: number[]
-  /** validated per-segment windows found inside THIS chunk (chunk-relative seconds).
-   *  Drives the live per-minute timeline in the UI. */
-  foundSegments?: ChunkFoundSegment[]
-  /** full raw Gemini outputs produced for this chunk (scan / rescan / verify), oldest first */
+  /** parsed HISSA 2 matches found inside THIS chunk (absolute movie seconds) */
+  matches?: ChunkMatch[]
+  /** full raw Gemini outputs produced for this chunk, oldest first */
   rawOutputs?: ChunkRawOutput[]
-}
-
-/** One duration-validated segment window found inside a chunk. */
-export interface ChunkFoundSegment {
-  segmentIndex: number
-  /** seconds WITHIN this chunk */
-  chunkStart: number
-  chunkEnd: number
-  confidence: number
-  speed: string
-}
-
-/** Full raw model output captured for a chunk request (for the UI expander). */
-export interface ChunkRawOutput {
-  kind: 'scan' | 'rescan' | 'verify'
-  model: string
-  t: number
-  /** which segment this request was about (rescan/verify only) */
-  segment?: number
-  text: string
-}
-
-/** Forensic-level details captured for a segment during the segmentation pass. */
-export interface SegmentForensics {
-  action_timeline: string
-  camera: string
-  subjects: string
-  start_frame: string
-  end_frame: string
-  background_details: string
-  audio: string
-  /** what makes this segment different from neighboring similar-looking segments (dialog scenes etc.) */
-  distinguishing_marks?: string
-}
-
-/** One scene segment detected in the short video during the segmentation pass. */
-export interface ShortSegment {
-  index: number
-  /** seconds within the short video, millisecond precision */
-  start: number
-  end: number
-  description: string
-  /** full forensic description used for exact-take matching in the scan prompt */
-  forensic?: SegmentForensics
-}
-
-/** Live per-segment verification state (2-key flow).
- *  pending → verifying → confirmed | rejected(1st) → rescanning → verifying(2nd) → confirmed | rejected_final */
-export type SegmentVerifyState =
-  | 'pending'
-  | 'verifying'
-  | 'rescanning'
-  | 'confirmed'
-  | 'rejected_final'
-
-export interface SegmentVerification {
-  state: SegmentVerifyState
-  /** how many 24fps verification attempts have run for this segment */
-  attempts: number
-  /** confidence returned by the last verification */
-  confidence?: number
-  /** model that produced the last verdict */
-  model?: string
-  /** which API key lane (1-5) ran the last verification */
-  keyLane?: number
-  /** detailed visual rejection reason from the verifier (why it is NOT the same footage) */
-  reason?: string
-  /** verifier note on confirm */
-  note?: string
-  /** exact matched extent WITHIN the short clip [start, end] seconds, reported by the 24fps verifier on CONFIRM */
-  matchedShortRange?: [number, number]
-  /** exact matched extent WITHIN the movie clip [start, end] seconds (clip-relative), reported by the 24fps verifier on CONFIRM */
-  matchedMovieRange?: [number, number]
-  /** first (rejected) movie window kept for the report, before a rescan remapped it */
-  rejectedWindow?: [number, number]
-}
-
-/** Frame-accurate mapping of ONE short-video segment to its exact location in the movie.
- *  This is the final per-segment result: window durations are validated server-side to
- *  equal the segment's exact duration. Only the best (highest confidence) mapping per
- *  segment is kept. */
-export interface SegmentMatch {
-  /** short-video segment index (S1, S2, ...) */
-  segmentIndex: number
-  /** seconds within the short video (from the segmentation scene map) */
-  shortStart: number
-  shortEnd: number
-  /** ABSOLUTE seconds within the full movie — exact same duration as the short segment */
-  movieStart: number
-  movieEnd: number
-  confidence: number
-  /** playback speed of the short vs the movie, e.g. "1.0x" */
-  speed: string
-  model: string
-  chunkIndex: number
-  /** live 24fps verification result (2-key flow); absent = never queued */
-  verification?: SegmentVerification
-  /** alternative windows found in OTHER chunks while the current mapping was unverified —
-   *  promoted for verification if the current mapping is rejected by the 24fps verifier.
-   *  Duplicates across chunks are EXPECTED (flashbacks/recaps repeat footage) — the
-   *  verifier decides which candidate is real; the first CONFIRM wins. */
-  alternates?: SegmentAlternate[]
-  /** all movie windows the verifier has finally rejected for this segment — never re-tried */
-  rejectedWindows?: [number, number][]
-  /** every chunk that ever produced a candidate window for this segment (best confidence
-   *  per chunk) — drives the confidence-ordered rescan after all candidates are rejected */
-  candidateChunks?: { chunkIndex: number; confidence: number }[]
-  /** chunks still waiting for a 24fps rescan (confidence order, highest first) */
-  rescanChunkQueue?: number[]
-}
-
-/** An alternative candidate window for a segment, found in a different chunk while
- *  another (unverified) mapping for the same segment was already held. */
-export interface SegmentAlternate {
-  shortStart: number
-  shortEnd: number
-  movieStart: number
-  movieEnd: number
-  confidence: number
-  speed: string
-  model: string
-  chunkIndex: number
-}
-
-export interface Candidate {
-  id: string
-  chunkIndex: number
-  confidence: number
-  /** which short-video segments (e.g. "S1, S3") were found in this chunk */
-  matchedSegments?: string
-  /** seconds within the short video [start, end] */
-  shortSegment: [number, number]
-  /** seconds within the chunk [start, end] */
-  chunkSegment: [number, number]
-  /** absolute seconds within the movie [start, end] */
-  absSegment: [number, number]
-  model: string
-  note: string
-}
-
-export interface MatchRegion {
-  id: string
-  /** absolute movie seconds */
-  movieStart: number
-  movieEnd: number
-  /** short-video seconds */
-  shortStart: number
-  shortEnd: number
-  candidateIds: string[]
-  /** which short-video segments (by index) this region was built from */
-  segmentIndexes?: number[]
-  maxConfidence: number
-  verified?: {
-    match: boolean
-    confidence: number
-    model: string
-    note: string
-  }
-  selected?: boolean
 }
 
 export interface LogEntry {
@@ -188,7 +43,6 @@ export type ScanStatus =
   | 'chunking'
   | 'ready'
   | 'scanning'
-  | 'verifying'
   | 'done'
   | 'stopped'
   | 'error'
@@ -205,9 +59,8 @@ export interface ScanReport {
   chunksScanned: number
   chunksFailed: number
   modelsUsed: string[]
-  regions: MatchRegion[]
-  /** final frame-by-frame per-segment map (exact durations) */
-  segmentMatches?: SegmentMatch[]
+  /** all parsed matches across all chunks (absolute movie seconds) */
+  matches: ChunkMatch[]
 }
 
 export interface Scan {
@@ -223,14 +76,8 @@ export interface Scan {
   chunkCount: number
   chunkingProgress: number
   chunks: ChunkState[]
-  /** Gemini's guess of which movie the short video is from (segmentation pass). */
-  movieGuess?: string | null
-  /** Scene segments of the short video detected during the segmentation pass, saved once and reused. */
-  shortSegments?: ShortSegment[]
-  /** Frame-accurate per-segment matches accumulated during the scan (best per segment). */
-  segmentMatches?: SegmentMatch[]
-  candidates: Candidate[]
-  regions: MatchRegion[]
+  /** all parsed matches across all chunks, sorted by shortStart (absolute movie seconds) */
+  matches: ChunkMatch[]
   logs: LogEntry[]
   startedAt: number | null
   finishedAt: number | null
