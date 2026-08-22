@@ -97,7 +97,7 @@ async function main() {
             ],
           },
         ],
-        config: { temperature: 0 },
+        config: { temperature: 0, maxOutputTokens: 65536 },
       })
       const secs = ((Date.now() - t0) / 1000).toFixed(1)
       const text = resp.text
