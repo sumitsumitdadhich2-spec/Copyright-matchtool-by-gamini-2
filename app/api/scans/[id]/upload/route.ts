@@ -39,24 +39,29 @@ export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }
   }
 
   if (kind === 'short') {
-    // If the target clip is longer than 1 minute, keep only the first minute.
-    if (duration > CHUNK_SECONDS + 1) {
-      const originalDur = duration
-      const trimmed = path.join(mediaDir, 'short-trimmed.mp4')
+    // ALWAYS re-encode the short video to 24 fps (and trim to the first minute when longer).
+    const originalDur = duration
+    const wasTrimmed = duration > CHUNK_SECONDS + 1
+    const reencoded = path.join(mediaDir, 'short-24fps.mp4')
+    try {
+      await extractSegment(dest, 0, Math.min(duration, CHUNK_SECONDS), reencoded)
+      fs.renameSync(reencoded, dest)
+      size = fs.statSync(dest).size
+      duration = await probeDuration(dest)
+      addLog(
+        scan,
+        'info',
+        wasTrimmed
+          ? `Short clip was ${fmtDur(originalDur)} — auto-trimmed to first ${fmtDur(duration)} and re-encoded at 24 fps`
+          : `Short clip re-encoded at 24 fps (${fmtDur(duration)})`,
+      )
+    } catch (err) {
       try {
-        await extractSegment(dest, 0, CHUNK_SECONDS, trimmed)
-        fs.renameSync(trimmed, dest)
-        size = fs.statSync(dest).size
-        duration = await probeDuration(dest)
-        addLog(scan, 'info', `Short clip was ${fmtDur(originalDur)} — auto-trimmed to first ${fmtDur(duration)}`)
-      } catch (err) {
-        try {
-          if (fs.existsSync(trimmed)) fs.unlinkSync(trimmed)
-        } catch {
-          // ignore
-        }
-        addLog(scan, 'warn', `Auto-trim failed, keeping full ${fmtDur(originalDur)} clip: ${err instanceof Error ? err.message : String(err)}`)
+        if (fs.existsSync(reencoded)) fs.unlinkSync(reencoded)
+      } catch {
+        // ignore
       }
+      addLog(scan, 'warn', `24 fps re-encode failed, keeping original ${fmtDur(originalDur)} clip: ${err instanceof Error ? err.message : String(err)}`)
     }
     scan.shortName = name
     scan.shortSize = size

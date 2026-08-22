@@ -161,7 +161,7 @@ function emptyScan(): Scan {
     chunkingProgress: 0,
     chunks: [],
     matches: [],
-    candidates: [],
+    candidateGroups: [],
     logs: [],
     startedAt: null,
     finishedAt: null,
