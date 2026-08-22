@@ -23,6 +23,15 @@ export function ReportPanel({ scan }: { scan: Scan }) {
         <Stat label="Matched segments" value={String(matches.length)} />
       </div>
 
+      {report.groupsTotal != null && report.groupsTotal > 0 && (
+        <div className="mt-2 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+          <Stat label="Candidate groups" value={String(report.groupsTotal)} />
+          <Stat label="Verifier confirmed" value={String(report.groupsConfirmed ?? 0)} />
+          <Stat label="Verifier rejected" value={String(report.groupsRejected ?? 0)} />
+          <Stat label="Unverified" value={String(report.groupsUnverified ?? 0)} />
+        </div>
+      )}
+
       {matches.length === 0 ? (
         <p className="mt-3 text-sm text-muted-foreground">No matches found — the short video does not appear in this movie.</p>
       ) : (
@@ -37,7 +46,8 @@ export function ReportPanel({ scan }: { scan: Scan }) {
                   <th className="py-1 pr-2 font-medium">Movie (global)</th>
                   <th className="py-1 pr-2 font-medium">Duration</th>
                   <th className="py-1 pr-2 font-medium">Chunk</th>
-                  <th className="py-1 font-medium">Model</th>
+                  <th className="py-1 pr-2 font-medium">Model</th>
+                  <th className="py-1 font-medium">Verified</th>
                 </tr>
               </thead>
               <tbody className="font-mono">
@@ -52,7 +62,14 @@ export function ReportPanel({ scan }: { scan: Scan }) {
                     </td>
                     <td className="py-1 pr-2">{(m.movieEnd - m.movieStart).toFixed(3)}s</td>
                     <td className="py-1 pr-2 text-muted-foreground">{m.chunkIndex}</td>
-                    <td className="py-1 text-muted-foreground">{m.model.replace('gemini-', '')}</td>
+                    <td className="py-1 pr-2 text-muted-foreground">{m.model.replace('gemini-', '')}</td>
+                    <td className="py-1">
+                      {m.verified ? (
+                        <span className="text-success">{m.viaRescan ? 'yes (rescan)' : 'yes'}</span>
+                      ) : (
+                        <span className="text-warning">no</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

@@ -133,6 +133,20 @@ export async function extractClipPrecise(
   ])
 }
 
+/** Remove all temporary verifier/rescan clip files. */
+export function cleanupClips(clipsDir: string) {
+  if (!fs.existsSync(clipsDir)) return
+  for (const f of fs.readdirSync(clipsDir)) {
+    if (f.endsWith('.mp4')) {
+      try {
+        fs.unlinkSync(path.join(clipsDir, f))
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
 export function cleanupChunks(outDir: string) {
   if (!fs.existsSync(outDir)) return
   for (const f of fs.readdirSync(outDir)) {

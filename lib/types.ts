@@ -133,6 +133,11 @@ export interface ScanReport {
   modelsUsed: string[]
   /** all parsed matches across all chunks (absolute movie seconds) */
   matches: ChunkMatch[]
+  /** verifier pipeline stats (present when the verification phase ran) */
+  groupsTotal?: number
+  groupsConfirmed?: number
+  groupsRejected?: number
+  groupsUnverified?: number
 }
 
 export interface Scan {
