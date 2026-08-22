@@ -1,54 +1,51 @@
 MODEL: gemini-3.5-flash
 CHUNK: 2 (movie 60s-120s)
-RESPONSE TIME: 230.8s
-TOKENS: prompt=192042 output=2616 total=257574
+RESPONSE TIME: 231.1s
+TOKENS: prompt=192042 output=1775 total=256730
 ============================================================
 
 =====================
 HISSA 1 — SHORT VIDEO TIME MAP
 =====================
-00:00.000 - 00:01.000 (0-24 frames): Ek aurat car me apne pati ko gale lagati hai. Text: "HUGGED MY HUSBAND TIGHTLY".
-00:01.000 - 00:02.000 (24-48 frames): Gale lagne ka close-up, uske haath me spikes wala board hai. Text: "HUGGED MY HUSBAND TIGHTLY HIS HEARTBEAT".
-00:02.000 - 00:02.917 (48-70 frames): Wo spikes ko touch karne ke liye haath badhati hai. Text: "THUMPING".
-00:02.917 - 00:04.000 (70-96 frames): Uske haath ka close-up jo sharp steel spikes ko touch kar raha hai. Text: "THUMPING AGAINST MY CHEST".
-00:04.000 - 00:05.000 (96-120 frames): Wo spikes ko red plaid blanket se cover karti hai. Text: "WHILE MY HAND SECRETLY".
-00:05.000 - 00:06.000 (120-144 frames): Wo blanket ko spikes ke upar dalti hai. Text: "WHILE MY HAND SECRETLY A BOARD OF".
-00:06.000 - 00:07.000 (144-168 frames): Uske face ka close-up, wo bolti hai "My love? Are you sure you have to go?". Text: "WHILE MY HAND SECRETLY HELD A BOARD OF RAZOR".
-00:07.000 - 00:08.000 (168-192 frames): Gale lagte waqt use dard hota hai aur wo chillati hai. Text: "SHARP STEEL SPIKES".
-00:08.000 - 00:09.000 (192-216 frames): Wo use gale lagaye rakhti hai, pained face ke sath. Text: "UNDER HIS SEAT".
-00:09.000 - 00:10.000 (216-240 frames): Uske haath ka close-up jo seat ke niche spikes par blanket daal raha hai. Text: "UNDER HIS SEAT HE SAID HE HAD URGENT".
-00:10.000 - 00:11.000 (240-264 frames): Wo use gale lagati hai aur bolti hai "I'll miss you like crazy." Text: "BUSINESS BUT I KNEW HE WAS LYING".
-00:11.000 - 00:12.000 (264-288 frames): Wo use zor se gale lagati hai. Text: "BUSINESS BUT I KNEW HE WAS LYING".
-00:12.000 - 00:13.000 (288-312 frames): Wo use gale lagana band karta hai, uska face hold karke bolta hai "Hop in. What?". Text: "I STOPPED HIM FROM".
-00:13.000 - 00:14.000 (312-336 frames): Wo shocked dikhti hai aur bolti hai "I just remembered". Text: "I STOPPED HIM FROM SITTING ON THE".
-00:14.000 - 00:15.000 (336-360 frames): Blanket ke niche spikes ke paas uske haath ka close-up. Text: "SPIKES AT THE LAST SECOND".
-00:15.000 - 00:16.000 (360-384 frames): Wo bolti hai "I just remembered I didn't turn off the water in the kitchen." Text: "I FORGOT".
-00:16.000 - 00:17.000 (384-408 frames): Wo confused dikhta hai, wo bolti hai "I didn't turn off the water in the kitchen." Text: "PRETENDING I FORGOT TO TURN OFF THE".
-00:17.000 - 00:18.000 (408-432 frames): Wo smile karta hai aur bolta hai "Okay, I guess I'll be off then." Text: "KITCHEN WATER".
-00:18.000 - 00:19.000 (432-456 frames): Wo car chalakar chala jata hai, wo sidewalk par khadi rehti hai. Text: "WHEN HE DROVE OFF".
-00:19.000 - 00:20.000 (456-480 frames): Wo sidewalk par khadi hokar use dekhti hai. Text: "WHEN HE DROVE OFF I FOLLOWED HIM".
-00:20.000 - 00:21.000 (480-504 frames): Wo bolti hai "Let's see what kind of work stuff you really have." Text: "MY CHEST TIGHTENED AS".
-00:21.000 - 00:22.000 (504-528 frames): Ek aurat white shirt aur grey skirt me sidewalk par langda kar chalti hai. Text: "TIGHTENED AS I SAW HIM RUN INTO".
-00:22.000 - 00:23.000 (528-552 frames): Langda kar chalne wali aurat apna hip/butt pakadti hai. Text: "THE ARMS OF MY BEST FRIEND".
-00:23.000 - 00:24.000 (552-576 frames): Pehli aurat (blue floral dress me) unhe dekhti hai. Text: "THE ARMS OF MY BEST FRIEND IDA".
-00:24.000 - 00:25.000 (576-600 frames): Langda kar chalne wali aurat (Ida) chali jati hai. Text: "THE ARMS OF MY BEST FRIEND IDA LATER".
-00:25.000 - 00:26.000 (600-624 frames): Ida langda kar chalti hai, pained face ke sath. Text: "IDA LIMPED UP TO ME".
-00:26.000 - 00:27.000 (624-648 frames): Ida bolti hai "Oh! Uh... I fell at the gym." Text: "IDA LIMPED UP TO ME LYING THAT SHE".
-00:27.000 - 00:28.000 (648-672 frames): Ida apna sir touch karti hai, embarrassed hokar. Text: "FELL AT THE GYM".
-00:28.000 - 00:29.000 (672-696 frames): Pehli aurat smile karti hai. Text: "FELL AT THE GYM I SMILED".
-00:29.000 - 00:30.000 (696-720 frames): Pehli aurat bolti hai "Yes! Exactly." Text: "FELL AT THE GYM I SMILED INVITING HER".
-00:30.000 - 00:31.000 (720-744 frames): Pehli aurat bolti hai "Why don't you and your husband..." Text: "AND HER HEALTHY HUSBAND RYAN".
-00:31.000 - 00:32.000 (744-768 frames): Pehli aurat bolti hai "...come over for dinner tonight?" Text: "AND HER HEALTHY HUSBAND RYAN OVER FOR DINNER TO".
-00:32.000 - 00:33.000 (768-792 frames): Pehli aurat fake excited face ke sath bolti hai "I'm pregnant!" Text: "FOR DINNER TO ENSURE THEY CAME".
-00:33.000 - 00:34.000 (792-816 frames): Pehli aurat bolti rehti hai "I'm pregnant!" Text: "I TOLD THEM I WAS PREGNANT".
-00:34.000 - 00:35.000 (816-840 frames): Ida shocked dikhti hai. Text: "I TOLD THEM I WAS PREGNANT BUT AT".
-00:35.000 - 00:36.000 (840-864 frames): Dinner table ka scene. Ryan (husband) wahan hai. Text: "THE DINNER TABLE".
-00:36.000 - 00:37.000 (864-888 frames): Ryan apna glass uthata hai. Text: "RYAN RAISED GLASS WITH A SMILE".
-00:37.000 - 00:38.000 (888-912 frames): Ryan smile karta hai aur toast karta hai. Text: "RYAN RAISED GLASS WITH A SMILE".
-00:38.000 - 00:39.000 (912-936 frames): Pehli aurat orange juice pour karti hai. Text: "UNAWARE OF MY TRAP".
-00:39.000 - 00:40.000 (936-960 frames): Pehli aurat khadi hoti hai. Text: "UNAWARE OF MY TRAP I STOOD UP".
-00:40.000 - 00:41.000 (960-984 frames): Pehli aurat bolti hai "...than you're expecting a baby?" Text: "BABY ISN'T MY HUSBAND'S".
-00:41.000 - 00:42.000 (984-1008 frames): Pehli aurat bolti hai "Only that, this baby is not yours." Text: "BABY ISN'T MY HUSBAND'S".
-00:42.000 - 00:43.000 (1008-1032 frames): Pehli aurat Ryan ki taraf point karke bolti hai "Oh, his." Text: "I ANNOUNCED IT'S RYAN'S".
-00:43.000 - 00:44.000 (1032-1056 frames): Ryan shocked dikhta hai. Text: "I ANNOUNCED IT'S RYAN'S WE HAD ONLY SECONDS".
-00:44.000 - 0
+00:00.000 - 00:01.000 (0-24 frames): Brunette woman says "Two lines!" and shows a pregnancy test.
+00:01.000 - 00:02.417 (24-58 frames): Close-up of the pregnancy test showing two lines.
+00:02.417 - 00:07.708 (58-185 frames): Dave says "Are you pregnant?"
+00:07.708 - 00:08.958 (185-215 frames): Close-up of her smiling and holding the pregnancy test.
+00:08.958 - 00:13.000 (215-312 frames): Dave is excited, saying "I mean, um..." and grabs her hands.
+00:13.000 - 00:18.000 (312-432 frames): Dave says "It's wonderful news, honey." and holds her hands.
+00:18.000 - 00:21.000 (432-504 frames): Dave says "I think I'm gonna call my mom."
+00:21.000 - 00:24.292 (504-583 frames): Dave and the brunette woman are standing on the sidewalk, Dave is holding his phone and says "It'll definitely make her day."
+00:24.292 - 00:28.542 (583-685 frames): A blonde woman (Ida) in a white shirt and grey skirt limps on the sidewalk, holding her hip.
+00:28.542 - 00:34.792 (685-835 frames): Brunette woman watches Ida, then Ida limps up to her.
+00:34.792 - 00:40.000 (835-960 frames): Brunette woman watches Ida, then Ida limps up to her.
+00:40.000 - 00:45.000 (960-1080 frames): Ida says "Uh... I fell at the gym."
+00:45.000 - 00:46.000 (1080-1104 frames): Brunette woman says "Oh really?" and Ida says "Mm-hmm."
+00:46.000 - 00:51.000 (1104-1224 frames): Brunette woman says "But you said you were going for a manicure today."
+00:51.000 - 00:56.000 (1224-1344 frames): Ida says "I mean... I fell during the manicure."
+00:56.000 - 01:00.000 (1344-1440 frames): Brunette woman says "Why don't you and your husband..."
+
+=====================
+HISSA 2 — MOVIE MAP TIME
+=====================
+VIDEO 2 SCENE LIST:
+00:00.000 - 00:18.000: Car scenes. Woman hugging a man in a car, holding a spiked board.
+00:18.000 - 00:34.667: Sidewalk scenes. Dave drives off, brunette woman stands on sidewalk, then watches Ida limping.
+00:34.667 - 01:00.000: Dinner table scenes. Ryan raises his glass, brunette woman stands up and announces the baby is Ryan's.
+
+MAPPING:
+Short 00:00.000 - 00:00.958 --> NOT FOUND — ye scene is movie chunk ke andar nahi hai
+Short 00:00.958 - 00:02.417 --> NOT FOUND — ye scene is movie chunk ke andar nahi hai
+Short 00:02.417 - 00:07.708 --> NOT FOUND — ye scene is movie chunk ke andar nahi hai
+Short 00:07.708 - 00:08.958 --> NOT FOUND — ye scene is movie chunk ke andar nahi hai
+Short 00:08.958 - 00:13.000 --> NOT FOUND — ye scene is movie chunk ke andar nahi hai
+Short 00:13.000 - 00:18.000 --> NOT FOUND — ye scene is movie chunk ke andar nahi hai
+Short 00:18.000 - 00:21.000 --> NOT FOUND — ye scene is movie chunk ke andar nahi hai
+Short 00:21.000 - 00:24.292 --> NOT FOUND — ye scene is movie chunk ke andar nahi hai
+Short 00:24.292 - 00:28.542 --> Movie 00:20.917 - 00:25.167 (502-604 frames) | Proof: Blonde woman limping on the sidewalk.
+Short 00:28.542 - 00:34.792 --> Movie 00:25.167 - 00:31.417 (604-754 frames) | Proof: Brunette woman watches Ida, then Ida limps up to her.
+Short 00:34.792 - 00:40.000 --> Movie 00:31.417 - 00:36.625 (754-879 frames) | Proof: Brunette woman watches Ida, then Ida limps up to her.
+Short 00:40.000 - 00:45.000 --> Movie 00:36.625 - 00:41.625 (879-999 frames) | Proof: Ida says "Uh... I fell at the gym."
+Short 00:45.000 - 00:46.000 --> Movie 00:41.625 - 00:42.625 (999-1023 frames) | Proof: Brunette woman says "Oh really?" and Ida says "Mm-hmm."
+Short 00:46.000 - 00:51.000 --> Movie 00:42.625 - 00:47.625 (1023-1143 frames) | Proof: Brunette woman says "But you said you were going for a manicure today."
+Short 00:51.000 - 00:56.000 --> Movie 00:47.625 - 00:52.625 (1143-1263 frames) | Proof: Ida says "I mean... I fell during the manicure."
+Short 00:56.000 - 01:00.000 --> Movie 00:52.625 - 00:56.625 (1263-1359 frames) | Proof: Brunette woman says "Why don't you and your husband..."
