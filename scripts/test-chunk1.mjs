@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process'
 import { GoogleGenAI } from '@google/genai'
 
 const ROOT = process.cwd()
-const MODEL = 'gemini-3.5-flash'
+const MODEL = process.env.TEST_MODEL || 'gemini-3.5-flash'
 const SCAN_FPS = 24
 
 // ---- 1. Extract the EXACT prompt from lib/gemini.ts (no re-typing) ----
