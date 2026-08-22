@@ -27,12 +27,13 @@ const FFMPEG = path.join(ROOT, 'node_modules', 'ffmpeg-static', 'ffmpeg')
 const MEDIA = path.join(ROOT, 'data/media/fa10a62dcb5f4120')
 const movie = path.join(MEDIA, 'movie.mp4')
 const short = path.join(MEDIA, 'short.mp4')
-const chunk1 = '/tmp/test-chunk-0000.mp4'
+const CHUNK_START = Number(process.env.CHUNK_START || 0) // seconds into the movie
+const chunk1 = `/tmp/test-chunk-${String(CHUNK_START).padStart(4, '0')}.mp4`
 
 if (!fs.existsSync(chunk1)) {
-  console.log('[test] Cutting chunk 1 (0-60s) with app-identical ffmpeg settings...')
+  console.log(`[test] Cutting chunk (${CHUNK_START}s - ${CHUNK_START + 60}s) with app-identical ffmpeg settings...`)
   const r = spawnSync(FFMPEG, [
-    '-y', '-i', movie,
+    '-y', '-ss', String(CHUNK_START), '-i', movie,
     '-vf', 'scale=640:-2,fps=24',
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
     '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
@@ -65,7 +66,7 @@ async function upload(fp, label) {
 }
 
 const shortFile = await upload(short, 'short.mp4 (60s)')
-const chunkFile = await upload(chunk1, 'chunk 1 (60s)')
+const chunkFile = await upload(chunk1, `chunk starting at ${CHUNK_START}s (60s)`)
 
 // ---- 5. Same request shape as mapChunkRequest() in the app ----
 console.log(`[test] Calling ${MODEL} with the app's exact chunk-map request...`)
