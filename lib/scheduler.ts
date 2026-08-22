@@ -1,7 +1,8 @@
 import path from 'node:path'
+import fs from 'node:fs'
 import type { GoogleGenAI } from '@google/genai'
-import type { Scan, ChunkState, ChunkMatch } from './types'
-import { MODEL_POOL, MODEL_MIN_INTERVAL_MS, RATE_COOLDOWN_MS, CHUNK_SECONDS, type ModelSpec } from './models'
+import type { Scan, ChunkState, ChunkMatch, CandidateGroup, CandidateEntry } from './types'
+import { MODEL_POOL, MODEL_MIN_INTERVAL_MS, RATE_COOLDOWN_MS, CHUNK_SECONDS, pacingIntervalMs, type ModelSpec } from './models'
 import {
   getScan,
   saveScan,
@@ -12,8 +13,20 @@ import {
   setModelExhausted,
   scanMediaDir,
 } from './store'
-import { chunkPath, cleanupChunks } from './ffmpeg'
-import { getClient, uploadVideo, deleteFileQuiet, mapChunkRequest, parseChunkMatches, GeminiError, classifyError } from './gemini'
+import { chunkPath, cleanupChunks, extractClipPrecise } from './ffmpeg'
+import {
+  getClient,
+  uploadVideo,
+  deleteFileQuiet,
+  mapChunkRequest,
+  parseChunkMatches,
+  verifyRequest,
+  rescanRequest,
+  parseVerdict,
+  parseRescanMatch,
+  GeminiError,
+  classifyError,
+} from './gemini'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -37,12 +50,26 @@ interface Job {
   /** chunk queue (indexes) */
   queue: number[]
   inFlight: Set<number>
+  /** verification phase: candidate-group queue (indexes into scan.candidateGroups) */
+  verifyQueue: number[]
+  verifyInFlight: Set<number>
   stopping: boolean
   /** rate-limit state keyed by `${laneIdx}|${modelId}` */
   lastRequestAt: Record<string, number>
   cooldownUntil: Record<string, number>
   dirty: boolean
   saverTimer: ReturnType<typeof setInterval> | null
+}
+
+/** Max attempts (non-rate errors) per candidate group before it is kept as unverified. */
+const MAX_GROUP_ATTEMPTS = 4
+
+/** Two short-video ranges are "the same segment" when they overlap ≥50% of the shorter one. */
+function sameShortSegment(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+  const overlap = Math.min(aEnd, bEnd) - Math.max(aStart, bStart)
+  if (overlap <= 0) return false
+  const shorter = Math.min(aEnd - aStart, bEnd - bStart)
+  return shorter <= 0 ? false : overlap / shorter >= 0.5
 }
 
 class Scheduler {
@@ -69,7 +96,13 @@ class Scheduler {
     }
     const queue = scan.chunks.filter((c) => c.status === 'pending').map((c) => c.index)
 
-    if (queue.length === 0) return { ok: false, error: 'No pending chunks to scan.' }
+    // Verification-only resume: all chunks already mapped but candidate groups
+    // still have pending verifier/rescan work (or matches were never verified).
+    const hasVerifyWork =
+      (scan.candidateGroups || []).some((g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning') ||
+      (!scan.candidateGroups?.length && (scan.matches || []).length > 0 && scan.chunks.every((c) => c.status !== 'pending' && c.status !== 'scanning'))
+
+    if (queue.length === 0 && !hasVerifyWork) return { ok: false, error: 'No pending chunks to scan.' }
 
     if (!Array.isArray(scan.matches)) scan.matches = []
     scan.status = 'scanning'
@@ -99,6 +132,8 @@ class Scheduler {
       lanes,
       queue,
       inFlight: new Set(),
+      verifyQueue: [],
+      verifyInFlight: new Set(),
       stopping: false,
       lastRequestAt: {},
       cooldownUntil: {},

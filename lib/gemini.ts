@@ -85,7 +85,8 @@ Watch Video 1 from start to finish and break it into small, fine-grained segment
 - Har segment chhota hona chahiye — zyada tar segments 1 second ya usse kam ke hone chahiye. Ek lambi continuous shot ko bhi chhote sub-segments me todo taaki mapping precise rahe.
 - Segments contiguous hone chahiye: har segment ka start = pichle segment ka end. Pehla segment 00:00.000 se shuru ho, aakhri segment video ki total duration par khatam ho. Koi gap nahi, koi overlap nahi.
 - Har line ka format:
-  mm:ss.mmm - mm:ss.mmm (startFrame-endFrame frames): <ek line ka Hinglish description — kaun kya kar raha hai, aur agar koi kuch bol raha hai to exact words quote karo>
+  mm:ss.mmm - mm:ss.mmm (startFrame-endFrame frames): <SHORT description, max 10-12 words — kaun kya kar raha hai; agar koi bolta hai to sirf exact quoted words>
+- Description LAMBA MAT karo — output token budget limited hai. Sirf identify karne layak minimum detail + exact dialogue quote.
 - Frame numbers = timestamp x 24 (24 fps). Timestamps millisecond precision me, frame boundaries 1/24s (0.0417s) steps par aligned.
 - Dialogue sabse strong fingerprint hai — kabhi summarize mat karo, hamesha exact words quote karo.
 
@@ -98,8 +99,12 @@ STRICT RULES:
 1. 1:1 SAME-DURATION MAPPING (sabse important rule): Har short segment ka movie me matched window EXACTLY utni hi duration ka hona chahiye. Agar short segment 0.417s ka hai, to movie window bhi 0.417s ka hoga — na kam, na zyada. (movie_end - movie_start) MUST equal (short_end - short_start). Kabhi bhi ek chhote short segment ko movie ke bade 5-10 second block par map mat karo.
 2. HAR SEGMENT KI APNI LINE: Har short segment ke liye alag mapping line likho. Kai segments ko ek saath ek badi range me merge mat karo (consecutive NOT FOUND segments ko ek line me group karna allowed hai).
 3. Movie timestamps Video 2 ki APNI clock se aane chahiye (00:00.000 se ~01:00.000) — frames ko actually dekh kar. Short video ke timestamps copy karke movie column me daalna FORBIDDEN hai jab tak tumne wahi frames Video 2 me us position par khud verify na kiye hon.
-4. NOT FOUND: Agar koi short segment is movie chunk ke andar NAHI milta, to clearly likho "NOT FOUND — ye scene is movie chunk ke andar nahi hai". Ye ek movie ka sirf 1-minute chunk hai — bahut se segments milenge hi nahi. Zabardasti match banana false positive hai, jo miss karne se bahut zyada bura hai. SIMILAR IS NOT SAME — same actors/location par different moment = NOT FOUND.
-5. Movie ke andar segments ka order short video ke order se alag ho sakta hai (short video edited hai) — har segment independently dhundho.
+4. NO EXTRAPOLATION (CRITICAL): Ek baar offset mil jane ke baad "short_time + offset" formula se aage ke segments AUTOMATICALLY map karna STRICTLY FORBIDDEN hai. Ye sabse common galti hai. Har naye segment ke liye Video 2 ke actual frames FIR SE dekho aur independently verify karo. Agar tum notice karo ki tumhare consecutive mappings ek fixed offset follow kar rahe hain (e.g. har match exactly +3.000s par), to RUK JAO aur har ek ko dobara verify karo — ye extrapolation drift ka signal hai, real matching ka nahi.
+5. DIALOGUE AUDIO VERIFICATION: Agar short segment me koi dialogue hai, to matched movie window me WAHI EXACT dialogue Video 2 ke audio me us position par actually SUNAI dena chahiye. Agar us movie window me wo words sunai nahi dete, to match INVALID hai — NOT FOUND likho. Bina dialogue verify kiye dialogue-wale segment ko map karna FORBIDDEN hai.
+6. CHUNK KA END = FOOTAGE KA END: Ye chunk poori movie ka sirf ek 1-minute tukda hai. Short video ka content is chunk ke END par cut ho sakta hai — uske baad ke short segments AGLE chunk me hain, is chunk me NAHI. Agar tumhara matched footage Video 2 ke end ke paas khatam ho raha hai, to baaki bache short segments ko zabardasti aakhri seconds me squeeze mat karo — unhe NOT FOUND likho. Suspicious sign: agar tumhara last match exactly Video 2 ke end (~01:00.000) par khatam hota hai, to bahut dhyan se verify karo.
+7. NOT FOUND: Agar koi short segment is movie chunk ke andar NAHI milta, to clearly likho "NOT FOUND — ye scene is movie chunk ke andar nahi hai". Bahut se segments milenge hi nahi — ye NORMAL aur EXPECTED hai. Zabardasti match banana false positive hai, jo miss karne se bahut zyada bura hai. SIMILAR IS NOT SAME — same actors/location par different moment = NOT FOUND. Ek naya scene short me shuru hua hai iska matlab ye NAHI ki wo is chunk me continue hota hai.
+8. Movie ke andar segments ka order short video ke order se alag ho sakta hai (short video edited hai) — har segment independently dhundho.
+9. FINAL SELF-CHECK: Answer dene se pehle apne saare matches dobara scan karo. Jo bhi match sirf "pichle match ke baad aata hai isliye" bana hai (frame evidence ke bina), use NOT FOUND me badlo.
 
 Har matched line ka format:
   Short mm:ss.mmm - mm:ss.mmm --> Movie mm:ss.mmm - mm:ss.mmm (startFrame-endFrame frames)
@@ -143,6 +148,128 @@ export async function mapChunkRequest(
   } catch (err) {
     throw classifyError(err)
   }
+}
+
+// ---------- Verifier (candidate confirmation) ----------
+
+/** Special prompt for the VERIFIER: two tiny clips, decide SAME vs DIFFERENT. */
+export const VERIFY_PROMPT = `You are a forensic video verifier. You are given TWO very short clips. Both are exactly 24 fps — compare them frame by frame at 24 fps precision.
+
+- Video 1: ek segment jo ek SHORT VIDEO se kata gaya hai.
+- Video 2: ek segment jo ek MOVIE se kata gaya hai.
+
+SAWAL: Kya ye dono clips EXACT SAME footage hain — same recording, same moment, frame-for-frame?
+
+RULES:
+1. Visuals AUR audio dono compare karo, frame by frame.
+2. Dialogue sabse strong fingerprint hai: agar dono clips me dialogue hai to EXACT same words, same voice, same timing hone chahiye. Words alag = DIFFERENT.
+3. SIMILAR IS NOT SAME: same actors, same location, same costume, milta-julta scene — lekin different take ya different moment = DIFFERENT.
+4. Crop, resize, compression, color-grade, watermark ya text-overlay ka difference IGNORE karo — underlying footage same ho sakta hai.
+5. Agar Video 1 ka footage Video 2 me nahi hai, to bina jhijhak DIFFERENT bolo. Zabardasti SAME bolna STRICTLY FORBIDDEN hai. Doubt ho to DIFFERENT bolo.
+
+Answer EXACTLY in this format (aur kuch nahi):
+VERDICT: SAME
+ya
+VERDICT: DIFFERENT
+REASON: <ek chhoti line Hinglish me>`
+
+/** Special prompt for a RESCAN: one failed short segment + the full 1-minute chunk it was claimed in. */
+export const RESCAN_PROMPT = `You are a forensic video analyst. You are given TWO videos. Both are exactly 24 fps — analyze frame by frame at 24 fps precision.
+
+- Video 1: ek chhota TARGET SEGMENT (ek short video se kata hua).
+- Video 2: ek ONE-MINUTE CHUNK jo ek movie se kata gaya hai.
+
+TASK: Video 2 ke andar EXACT wahi footage dhundho jo Video 1 me hai — same recording, frame-for-frame. Sirf similar scene hona kaafi NAHI hai.
+
+STRICT RULES:
+1. Poora Video 2 shuru se aakhir tak frame-by-frame scan karo. Koi shortcut nahi.
+2. Matched window ki duration EXACTLY Video 1 ki duration ke barabar honi chahiye — na kam, na zyada.
+3. DIALOGUE VERIFICATION: agar Video 1 me koi dialogue hai, to wahi EXACT words Video 2 ki audio me usi window par actually sunai dene chahiye. Words sunai nahi dete = match INVALID.
+4. SIMILAR IS NOT SAME: same actors/location par different moment ya different take = NOT FOUND.
+5. AGAR YE SEGMENT VIDEO 2 ME NAHI HAI, TO SAAF MANA KAR DO — "NOT FOUND" likho. Zabardasti match banana STRICTLY FORBIDDEN hai. NOT FOUND ek bilkul valid aur expected answer hai. Doubt ho to NOT FOUND.
+
+Answer EXACTLY ek line me (Video 2 ki apni clock par, 00:00.000 se ~01:00.000):
+MATCH: mm:ss.mmm - mm:ss.mmm
+ya
+NOT FOUND — <chhota reason>`
+
+/** One verifier request: short-segment clip + movie-window clip, both @ 24 fps. */
+export async function verifyRequest(
+  ai: GoogleGenAI,
+  model: string,
+  shortClipUri: string,
+  movieClipUri: string,
+): Promise<string> {
+  try {
+    const resp = await ai.models.generateContent({
+      model,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { fileData: { fileUri: shortClipUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
+            { fileData: { fileUri: movieClipUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
+            { text: VERIFY_PROMPT },
+          ] as never,
+        },
+      ],
+      config: { temperature: 0 },
+    })
+    const text = resp.text
+    if (!text) throw new Error('Empty verifier response')
+    return text
+  } catch (err) {
+    throw classifyError(err)
+  }
+}
+
+/** One rescan request: failed short-segment clip + the full 1-minute chunk, both @ 24 fps. */
+export async function rescanRequest(
+  ai: GoogleGenAI,
+  model: string,
+  segmentClipUri: string,
+  chunkUri: string,
+): Promise<string> {
+  try {
+    const resp = await ai.models.generateContent({
+      model,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { fileData: { fileUri: segmentClipUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
+            { fileData: { fileUri: chunkUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
+            { text: RESCAN_PROMPT },
+          ] as never,
+        },
+      ],
+      config: { temperature: 0 },
+    })
+    const text = resp.text
+    if (!text) throw new Error('Empty rescan response')
+    return text
+  } catch (err) {
+    throw classifyError(err)
+  }
+}
+
+/** Parse the verifier's answer. Returns null when no clear verdict was given. */
+export function parseVerdict(raw: string): { same: boolean; reason: string } | null {
+  const m = raw.match(/VERDICT\s*:\s*(SAME|DIFFERENT)/i)
+  if (!m) return null
+  const r = raw.match(/REASON\s*:\s*(.+)/i)
+  return { same: m[1].toUpperCase() === 'SAME', reason: (r?.[1] || '').trim().slice(0, 300) }
+}
+
+/** Parse a rescan answer into a chunk-local window, or null for NOT FOUND / unparseable. */
+export function parseRescanMatch(raw: string): { start: number; end: number } | null {
+  if (/NOT\s*FOUND/i.test(raw) && !/MATCH\s*:/i.test(raw)) return null
+  const m = raw.match(/MATCH\s*:\s*(\d+:\d+(?:\.\d+)?)\s*-\s*(\d+:\d+(?:\.\d+)?)/i)
+  if (!m) return null
+  const start = parseTs(m[1])
+  const end = parseTs(m[2])
+  if (start === null || end === null || end <= start) return null
+  return { start, end }
 }
 
 /** Parse "mm:ss.mmm" (also tolerates "m:ss.mm" / "mm:ss") into seconds. */

@@ -30,3 +30,23 @@ export const RATE_COOLDOWN_MS = 60_000
 export const SCAN_FPS = 24
 
 export const CHUNK_SECONDS = 60
+
+/** Free-tier TPM cap shared by every model in the pool. */
+export const TPM_LIMIT = 250_000
+
+/** Measured token cost per video frame at DEFAULT media resolution. */
+export const TOKENS_PER_FRAME = 65
+
+/** Estimate the token cost of a request from its total video seconds (all clips combined, 24 fps). */
+export function estimateRequestTokens(totalVideoSeconds: number): number {
+  return Math.ceil(totalVideoSeconds * SCAN_FPS * TOKENS_PER_FRAME) + 2_000
+}
+
+/** Minimum spacing (ms) between requests of this size on one (key × model) lane
+ * so the model runs at FULL TPM capacity — small verify clips wait seconds,
+ * full chunk-map requests wait the whole minute. */
+export function pacingIntervalMs(totalVideoSeconds: number): number {
+  const tokens = estimateRequestTokens(totalVideoSeconds)
+  const ms = Math.ceil((tokens / TPM_LIMIT) * 60_000)
+  return Math.min(MODEL_MIN_INTERVAL_MS, Math.max(3_000, ms))
+}
