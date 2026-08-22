@@ -111,6 +111,28 @@ export async function extractSegment(
   ])
 }
 
+/** Millisecond-precise clip cut for the verifier/rescan pipeline.
+ * Re-encodes (640px / CRF 28 / mono AAC) so cuts are frame-accurate at 24 fps.
+ * Very short windows are padded to a minimum of 1s so Gemini gets enough frames. */
+export async function extractClipPrecise(
+  sourceFile: string,
+  start: number,
+  end: number,
+  outFile: string,
+): Promise<void> {
+  const dur = Math.max(1, end - start)
+  await run(FFMPEG, [
+    '-y',
+    '-ss', Math.max(0, start).toFixed(3),
+    '-i', sourceFile,
+    '-t', dur.toFixed(3),
+    '-vf', 'scale=640:-2',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+    '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
+    outFile,
+  ])
+}
+
 export function cleanupChunks(outDir: string) {
   if (!fs.existsSync(outDir)) return
   for (const f of fs.readdirSync(outDir)) {

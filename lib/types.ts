@@ -11,6 +11,10 @@ export interface ChunkMatch {
   /** which movie chunk this match was found in */
   chunkIndex: number
   model: string
+  /** verifier outcome: true = confirmed SAME at 24fps, false = kept but unverified (API errors) */
+  verified?: boolean
+  /** the confirmed window came from a rescan, not the original chunk mapping */
+  viaRescan?: boolean
 }
 
 /** Full raw model output captured for a chunk request (for the UI expander). */
@@ -66,6 +70,55 @@ export interface Candidate {
   note?: string
 }
 
+// ---------- Candidate + Verifier system ----------
+
+export type CandidateVerdict = 'pending' | 'verifying' | 'same' | 'different' | 'error'
+export type RescanState = 'none' | 'pending' | 'rescanning' | 'found' | 'not_found' | 'error'
+
+/** One movie-window candidate for a short segment (one parsed chunk match). */
+export interface CandidateEntry {
+  /** ABSOLUTE movie seconds */
+  movieStart: number
+  movieEnd: number
+  chunkIndex: number
+  /** model that produced this candidate during the chunk phase */
+  model: string
+  /** verifier verdict for this exact window */
+  verdict: CandidateVerdict
+  verifierModel?: string
+  verifierReason?: string
+  /** rescan of this candidate's full 1-minute chunk (runs only if verify said different) */
+  rescan: RescanState
+  /** window found by the rescan (ABSOLUTE movie seconds), if any */
+  rescanMovieStart?: number
+  rescanMovieEnd?: number
+  /** verifier verdict for the rescan-found window */
+  rescanVerdict?: CandidateVerdict
+  rescanReason?: string
+}
+
+export type CandidateGroupStatus =
+  | 'pending' // waiting for a verifier worker
+  | 'verifying' // verifier requests in flight
+  | 'rescanning' // all candidates failed verify — rescanning their chunks
+  | 'confirmed' // a candidate (or rescan window) was verified SAME
+  | 'rejected' // every candidate + every rescan failed — final decision: not a match
+  | 'unverified' // could not verify due to repeated API errors — original match kept, flagged
+
+/** All candidates that claim the SAME short-video segment, verified as one unit. */
+export interface CandidateGroup {
+  id: string
+  /** seconds within the short video */
+  shortStart: number
+  shortEnd: number
+  status: CandidateGroupStatus
+  candidates: CandidateEntry[]
+  /** index into candidates[] of the confirmed window (rescan window if confirmedViaRescan) */
+  confirmedIndex: number | null
+  confirmedViaRescan: boolean
+  attempts: number
+}
+
 export interface ModelLiveState {
   state: 'idle' | 'active' | 'cooling' | 'exhausted' | 'waiting'
   currentChunk: number | null
@@ -99,6 +152,8 @@ export interface Scan {
   matches: ChunkMatch[]
   /** UI-only: candidate system removed — backend never fills this, panel shows its empty state */
   candidates?: Candidate[]
+  /** Candidate + verifier pipeline: one group per claimed short segment */
+  candidateGroups?: CandidateGroup[]
   logs: LogEntry[]
   startedAt: number | null
   finishedAt: number | null
