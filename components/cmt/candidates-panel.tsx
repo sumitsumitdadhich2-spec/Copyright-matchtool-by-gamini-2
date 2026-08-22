@@ -6,20 +6,23 @@ import type { Scan, Candidate } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
 
 export function CandidatesPanel({ scan }: { scan: Scan }) {
+  // Candidate system backend removed — panel keeps its exact UI and shows the
+  // empty state until the candidate system is re-implemented.
+  const candidates = scan.candidates ?? []
   return (
     <section aria-label="Match candidates" className="rounded-lg border border-border bg-card p-4">
       <div className="flex items-center gap-2">
         <Target className="size-4 text-destructive" aria-hidden />
         <h2 className="text-sm font-semibold">Match Candidates</h2>
-        <span className="ml-auto font-mono text-xs text-muted-foreground">{scan.candidates.length}</span>
+        <span className="ml-auto font-mono text-xs text-muted-foreground">{candidates.length}</span>
       </div>
-      {scan.candidates.length === 0 ? (
+      {candidates.length === 0 ? (
         <p className="mt-2 text-xs text-muted-foreground">
           Scanner candidates appear here live as the scan runs. Model confidence is informational only — a candidate counts as matched only after 24fps verifier confirmation.
         </p>
       ) : (
         <div className="mt-3 grid gap-3 md:grid-cols-2">
-          {[...scan.candidates]
+          {[...candidates]
             .sort((a, b) => a.absSegment[0] - b.absSegment[0])
             .map((c) => (
               <CandidateCard key={c.id} scan={scan} c={c} />

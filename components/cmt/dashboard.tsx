@@ -10,6 +10,7 @@ import { UploadPanel } from './upload-panel'
 import { ScanTimeline } from './scan-timeline'
 import { ModelBoard } from './model-board'
 import { ChunkResultsPanel } from './chunk-results-panel'
+import { CandidatesPanel } from './candidates-panel'
 import { LogsPanel } from './logs-panel'
 import { ReportPanel } from './report-panel'
 import { ComparePanel } from './compare-panel'
@@ -123,6 +124,7 @@ export function Dashboard() {
           <UploadPanel scan={scan} onScanCreated={(id) => setScanId(id)} refresh={() => void mutate()} />
           <ScanTimeline scan={scan || emptyScan()} />
           <ModelBoard scan={scan} usage={data?.usage || null} />
+          {scan && <CandidatesPanel scan={scan} />}
           {scan && scan.report && <ReportPanel scan={scan} />}
           {scan && (scan.matches?.length ?? 0) > 0 && <ComparePanel scan={scan} />}
           {scan && <ChunkResultsPanel scan={scan} />}
@@ -159,6 +161,7 @@ function emptyScan(): Scan {
     chunkingProgress: 0,
     chunks: [],
     matches: [],
+    candidates: [],
     logs: [],
     startedAt: null,
     finishedAt: null,
