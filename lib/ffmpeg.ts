@@ -51,9 +51,12 @@ function parseFfmpegTime(line: string): number | null {
   return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])
 }
 
+/** Every file sent to Gemini is hard-encoded at 24 fps (Gemini's default video rate). */
+const SCAN_FPS_STR = '24'
+
 /**
  * Cut the movie into exact sequential 1-minute chunks.
- * Re-encodes at 640px width / CRF 28 with keyframes forced at every 60s so
+ * Re-encodes at 24 fps / 640px width / CRF 28 with keyframes forced at every 60s so
  * chunk boundaries are frame-accurate and files stay small for upload.
  */
 export async function chunkMovie(
@@ -69,7 +72,7 @@ export async function chunkMovie(
     [
       '-y',
       '-i', movieFile,
-      '-vf', 'scale=640:-2',
+      '-vf', `scale=640:-2,fps=${SCAN_FPS_STR}`,
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
       '-force_key_frames', `expr:gte(t,n_forced*${CHUNK_SECONDS})`,
       '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
@@ -91,7 +94,7 @@ export function chunkPath(outDir: string, index: number): string {
   return path.join(outDir, `chunk-${String(index).padStart(4, '0')}.mp4`)
 }
 
-/** Extract a sub-clip from a video (used when trimming the short video on upload). */
+/** Extract a sub-clip from a video (used when trimming the short video on upload). Output is 24 fps. */
 export async function extractSegment(
   sourceFile: string,
   start: number,
@@ -104,7 +107,7 @@ export async function extractSegment(
     '-ss', start.toFixed(2),
     '-i', sourceFile,
     '-t', dur.toFixed(2),
-    '-vf', 'scale=640:-2',
+    '-vf', `scale=640:-2,fps=${SCAN_FPS_STR}`,
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
     '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
     outFile,
@@ -112,7 +115,7 @@ export async function extractSegment(
 }
 
 /** Millisecond-precise clip cut for the verifier/rescan pipeline.
- * Re-encodes (640px / CRF 28 / mono AAC) so cuts are frame-accurate at 24 fps.
+ * Re-encodes at 24 fps (640px / CRF 28 / mono AAC) so cuts are frame-accurate at 24 fps.
  * Very short windows are padded to a minimum of 1s so Gemini gets enough frames. */
 export async function extractClipPrecise(
   sourceFile: string,
@@ -126,7 +129,7 @@ export async function extractClipPrecise(
     '-ss', Math.max(0, start).toFixed(3),
     '-i', sourceFile,
     '-t', dur.toFixed(3),
-    '-vf', 'scale=640:-2',
+    '-vf', `scale=640:-2,fps=${SCAN_FPS_STR}`,
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
     '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
     outFile,

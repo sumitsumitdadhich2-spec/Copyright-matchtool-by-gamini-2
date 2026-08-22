@@ -29,7 +29,7 @@ export interface ChunkState {
   status: ChunkStatus
   model?: string
   attempts: number
-  /** UI-only placeholder — candidate/verifier system removed, never set by the backend */
+  /** legacy UI field — not set by the current pipeline */
   confidence?: number
   /** parsed HISSA 2 matches found inside THIS chunk (absolute movie seconds) */
   matches?: ChunkMatch[]
@@ -49,26 +49,11 @@ export type ScanStatus =
   | 'chunking'
   | 'ready'
   | 'scanning'
-  /** UI-only placeholder status — verifier system removed, will be re-added later */
+  /** candidate-verification phase: verifier + rescan requests in flight */
   | 'verifying'
   | 'done'
   | 'stopped'
   | 'error'
-
-/** UI-ONLY placeholder type. The candidate system's backend has been removed
- *  and will be re-implemented later — this type only keeps the Candidates
- *  panel UI compiling and rendering exactly as before. */
-export interface Candidate {
-  id: string
-  /** [start, end] seconds within the short video */
-  shortSegment: [number, number]
-  /** [start, end] ABSOLUTE seconds within the full movie */
-  absSegment: [number, number]
-  chunkIndex: number
-  model: string
-  confidence: number
-  note?: string
-}
 
 // ---------- Candidate + Verifier system ----------
 
@@ -155,8 +140,6 @@ export interface Scan {
   chunks: ChunkState[]
   /** all parsed matches across all chunks, sorted by shortStart (absolute movie seconds) */
   matches: ChunkMatch[]
-  /** UI-only: candidate system removed — backend never fills this, panel shows its empty state */
-  candidates?: Candidate[]
   /** Candidate + verifier pipeline: one group per claimed short segment */
   candidateGroups?: CandidateGroup[]
   logs: LogEntry[]
