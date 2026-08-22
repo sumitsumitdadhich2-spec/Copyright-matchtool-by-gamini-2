@@ -9,13 +9,14 @@ export interface ModelSpec {
   rpd: number
 }
 
+// STRONG MODELS ONLY: lite models were removed because they copy short-video
+// timestamps into the movie column instead of actually verifying frames
+// (observed in real scans). Chunk mapping is only reliable on full flash models.
 export const MODEL_POOL: ModelSpec[] = [
-  { id: 'gemini-flash-lite-latest', rpm: 15, rpd: 500 },
-  { id: 'gemini-3.1-flash-lite', rpm: 15, rpd: 500 },
   { id: 'gemini-3.6-flash', rpm: 5, rpd: 20 },
   { id: 'gemini-3.5-flash', rpm: 5, rpd: 20 },
+  { id: 'gemini-3.1-flash', rpm: 5, rpd: 20 },
   { id: 'gemini-2.5-flash', rpm: 5, rpd: 20 },
-  { id: 'gemini-2.5-flash-lite', rpm: 10, rpd: 20 },
 ]
 
 /** Minimum spacing between requests per model (ms). TPM 250K vs ~190K tokens/request

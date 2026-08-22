@@ -105,14 +105,16 @@ STRICT RULES:
 7. NOT FOUND: Agar koi short segment is movie chunk ke andar NAHI milta, to clearly likho "NOT FOUND — ye scene is movie chunk ke andar nahi hai". Bahut se segments milenge hi nahi — ye NORMAL aur EXPECTED hai. Zabardasti match banana false positive hai, jo miss karne se bahut zyada bura hai. SIMILAR IS NOT SAME — same actors/location par different moment = NOT FOUND. Ek naya scene short me shuru hua hai iska matlab ye NAHI ki wo is chunk me continue hota hai.
 8. Movie ke andar segments ka order short video ke order se alag ho sakta hai (short video edited hai) — har segment independently dhundho.
 9. FINAL SELF-CHECK: Answer dene se pehle apne saare matches dobara scan karo. Jo bhi match sirf "pichle match ke baad aata hai isliye" bana hai (frame evidence ke bina), use NOT FOUND me badlo.
+10. IDENTITY-COPY BAN (ZERO TOLERANCE): Movie timestamps ka short timestamps ke EXACTLY EQUAL hona (Short 00:05.000-00:06.000 --> Movie 00:05.000-00:06.000) sirf tab valid hai jab tumne Video 2 ke us exact position par wahi frames khud dekh kar confirm kiye hon — ye coincidence bahut RARE hai. Agar tumhare answer me 2 se zyada consecutive mappings me movie time = short time exactly same aa raha hai, to tum COPY kar rahe ho, verify nahi — ye STRICTLY FORBIDDEN hai. Aisi saari lines ko turant NOT FOUND me badlo jab tak har ek ke liye Video 2 me alag se frame evidence na ho. Short column ke numbers ko movie column me duplicate karna automatic FAIL hai.
+11. OUTPUT FORMAT STRICT (parser ke liye): HISSA 2 ki har line EXACTLY neeche diye format me honi chahiye — har line "Short " word se SHURU ho, short timestamps ke turant baad KOI frames/extra text NAHI, "-->" ke baad "Movie " word zaroor ho. Format se ek character bhi alag likhna FORBIDDEN hai, warna line reject ho jayegi.
 
-Har matched line ka format:
+Har matched line ka format (EXACT, koi variation nahi):
   Short mm:ss.mmm - mm:ss.mmm --> Movie mm:ss.mmm - mm:ss.mmm (startFrame-endFrame frames)
 
-Na milne par:
+Na milne par (EXACT, "Short " word ke saath):
   Short mm:ss.mmm - mm:ss.mmm --> NOT FOUND — <chhota reason>
 
-Poore answer me sirf HISSA 1 aur HISSA 2 do, aur kuch nahi.`
+Poore answer me sirf HISSA 1 aur HISSA 2 do, aur kuch nahi. Answer kabhi beech me mat chhodo — HISSA 2 me short video ke HAR segment ki line poori karo.`
 
 /** One chunk-map request: whole short video + one movie chunk, the SAME prompt every time.
  * Returns the raw model text (HISSA 1 + HISSA 2) — parsing happens separately. */
@@ -137,6 +139,9 @@ export async function mapChunkRequest(
       ],
       config: {
         temperature: 0,
+        // Max output tokens raised so long HISSA 1 + HISSA 2 answers never get
+        // cut off mid-line (chunk 1 responses were truncating at the default limit).
+        maxOutputTokens: 65536,
         // DEFAULT media resolution only (~65 tok/frame, measured). Never set
         // mediaResolution: LOW/MEDIUM behave the same as default, and HIGH
         // quadruples cost to ~257 tok/frame.
