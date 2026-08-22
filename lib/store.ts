@@ -154,8 +154,7 @@ export function newScan(): Scan {
     chunkCount: 0,
     chunkingProgress: 0,
     chunks: [],
-    candidates: [],
-    regions: [],
+    matches: [],
     logs: [],
     startedAt: null,
     finishedAt: null,
@@ -190,8 +189,7 @@ export function listScans(): ScanSummary[] {
       movieName: s.movieName,
       shortName: s.shortName,
       movieDuration: s.movieDuration,
-      // Finished scans count ONLY final (verifier-gated) regions — never raw candidates.
-      matchCount: s.report ? s.regions.length : s.regions.length || s.candidates.length,
+      matchCount: (s.matches || []).length,
       finishedAt: s.finishedAt,
     })
   }

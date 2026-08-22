@@ -9,7 +9,6 @@ import { ApiKeyPanel } from './api-key-panel'
 import { UploadPanel } from './upload-panel'
 import { ScanTimeline } from './scan-timeline'
 import { ModelBoard } from './model-board'
-import { CandidatesPanel } from './candidates-panel'
 import { ChunkResultsPanel } from './chunk-results-panel'
 import { LogsPanel } from './logs-panel'
 import { ReportPanel } from './report-panel'
@@ -30,7 +29,7 @@ export function Dashboard() {
   const { data, mutate } = useSWR<ScanResponse>(scanId ? `/api/scans/${scanId}` : null, fetcher, {
     refreshInterval: (latest) => {
       const st = latest?.scan?.status
-      return st === 'scanning' || st === 'verifying' || st === 'chunking' || latest?.running ? 1500 : 5000
+      return st === 'scanning' || st === 'chunking' || latest?.running ? 1500 : 5000
     },
   })
 
@@ -70,7 +69,7 @@ export function Dashboard() {
           </span>
           <div>
             <h1 className="text-lg font-semibold leading-tight">Copyright Match Tool</h1>
-            <p className="text-xs text-muted-foreground">Gemini-powered clip-in-movie scanner · 24 fps scan · 24 fps verify</p>
+            <p className="text-xs text-muted-foreground">Gemini-powered clip-in-movie scanner · one prompt per movie minute · 24 fps</p>
           </div>
         </div>
 
@@ -125,8 +124,7 @@ export function Dashboard() {
           <ScanTimeline scan={scan || emptyScan()} />
           <ModelBoard scan={scan} usage={data?.usage || null} />
           {scan && scan.report && <ReportPanel scan={scan} />}
-          {scan && (scan.regions.length > 0 || (scan.segmentMatches?.length ?? 0) > 0) && <ComparePanel scan={scan} />}
-          {scan && <CandidatesPanel scan={scan} />}
+          {scan && (scan.matches?.length ?? 0) > 0 && <ComparePanel scan={scan} />}
           {scan && <ChunkResultsPanel scan={scan} />}
           {scan && <LogsPanel scan={scan} />}
         </div>
@@ -160,8 +158,7 @@ function emptyScan(): Scan {
     chunkCount: 0,
     chunkingProgress: 0,
     chunks: [],
-    candidates: [],
-    regions: [],
+    matches: [],
     logs: [],
     startedAt: null,
     finishedAt: null,
