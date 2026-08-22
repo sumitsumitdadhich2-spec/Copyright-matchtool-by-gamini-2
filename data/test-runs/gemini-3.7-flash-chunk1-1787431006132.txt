@@ -1,0 +1,87 @@
+
+================================================================================
+MODEL: gemini-3.7-flash   |   CHUNK 1 (1:00-2:00)   |   2026-08-22T20:35:45.278Z
+================================================================================
+
+TOKENS -> prompt: 191562 | output: 3432 | thoughts: 3165 | total: 198159 | time: 60.9s
+
+=====================
+HISSA 1 — SHORT VIDEO TIME MAP
+=====================
+- 00:00.000 - 00:01.000 (0-24 frames): Woman hugging husband tightly in car.
+- 00:01.000 - 00:02.000 (24-48 frames): Woman embraces husband while preparing trap.
+- 00:02.000 - 00:02.917 (48-70 frames): Woman holding spike board against car seat.
+- 00:02.917 - 00:04.000 (70-96 frames): Woman's hand placing spike board on seat.
+- 00:04.000 - 00:05.000 (96-120 frames): Woman covering the sharp spikes with a blanket.
+- 00:05.000 - 00:05.792 (120-139 frames): Blanket arranged over spike board.
+- 00:05.792 - 00:07.000 (139-168 frames): Woman hugging husband: "My love? Are you sure you have to go?"
+- 00:07.000 - 00:08.000 (168-192 frames): Woman acting emotional during the hug.
+- 00:08.000 - 00:08.958 (192-215 frames): Woman holding husband inside the vehicle.
+- 00:08.958 - 00:10.417 (215-250 frames): Husband's hand adjusting blanket over the seat.
+- 00:10.417 - 00:12.000 (250-288 frames): Husband hugs back: "Yeah, I'm pretty sure. Urgent business. I'll miss you like crazy."
+- 00:12.000 - 00:13.000 (288-312 frames): Husband tries to sit down: "Hop in. What?"
+- 00:13.000 - 00:13.958 (312-335 frames): Woman stops him from sitting on the spikes.
+- 00:13.958 - 00:15.000 (335-360 frames): Close-up of husband's hand touching blanket above spikes.
+- 00:15.000 - 00:16.000 (360-384 frames): Woman panicking: "I just remembered"
+- 00:16.000 - 00:17.042 (384-409 frames): Woman making excuse: "I didn't turn off the water in the kitchen."
+- 00:17.042 - 00:18.167 (409-436 frames): Husband smiles in car: "Okay, I guess I'll be off then."
+- 00:18.167 - 00:19.083 (436-458 frames): Woman standing outside waving goodbye.
+- 00:19.083 - 00:20.000 (458-480 frames): Woman watches car drive away: "Let's see what kind of work stuff you really have."
+- 00:20.000 - 00:20.917 (480-502 frames): Woman standing with arms crossed on sidewalk.
+- 00:20.917 - 00:22.000 (502-528 frames): Blonde woman Ida limping and holding her backside in pain.
+- 00:22.000 - 00:22.958 (528-551 frames): Ida struggling to walk past sidewalk bollards.
+- 00:22.958 - 00:23.708 (551-569 frames): Woman watches Ida while husband walks in background on phone.
+- 00:23.708 - 00:24.500 (569-588 frames): Woman turns around observing Ida.
+- 00:24.500 - 00:25.500 (588-612 frames): Ida limping forward in discomfort.
+- 00:25.500 - 00:27.000 (612-648 frames): Woman asks: "Ida, what happened?"
+- 00:27.000 - 00:28.250 (648-678 frames): Ida touching head and groaning: "Uh... I fell at the gym."
+- 00:28.250 - 00:29.000 (678-696 frames): Ida laughs awkwardly: "Yes! Exactly."
+- 00:29.000 - 00:29.792 (696-715 frames): Ida smiling while standing on sidewalk.
+- 00:29.792 - 00:31.000 (715-744 frames): Woman asks: "Why don't you and your husband..."
+- 00:31.000 - 00:32.250 (744-774 frames): Woman continues: "...come over for dinner tonight?"
+- 00:32.250 - 00:32.625 (774-783 frames): Ida declines: "Sorry, but we already have plans."
+- 00:32.625 - 00:33.875 (783-813 frames): Woman excitedly announces: "I'm pregnant!"
+- 00:33.875 - 00:34.667 (813-832 frames): Ida raises her hand in shock.
+- 00:34.667 - 00:35.542 (832-853 frames): Dinner scene transition.
+- 00:35.542 - 00:37.042 (853-889 frames): Ryan raising glass smiling at dinner table.
+- 00:37.042 - 00:38.000 (889-912 frames): Guests chatting happily around dinner table.
+- 00:38.000 - 00:39.000 (912-936 frames): Woman smiling holding drink at dinner table.
+- 00:39.000 - 00:40.042 (936-961 frames): Woman stands up from the table.
+- 00:40.042 - 00:41.000 (961-984 frames): Dave asks: "than you're expecting a baby?"
+- 00:41.000 - 00:42.000 (984-1008 frames): Woman reveals: "Only that, this baby is not yours."
+- 00:42.000 - 00:43.167 (1008-1036 frames): Woman points: "Whose is it, then? Oh, his."
+- 00:43.167 - 00:44.000 (1036-1056 frames): Ryan smiling nervously with wine glass.
+- 00:44.000 - 00:45.000 (1056-1080 frames): Woman says: "We have been dating secretly for a year."
+- 00:45.000 - 00:46.042 (1080-1105 frames): Woman announces: "And now, it's time for you to know the truth."
+- 00:46.042 - 00:47.042 (1105-1129 frames): Dave and Ida shocked by the revelation.
+- 00:47.042 - 00:48.000 (1129-1152 frames): Dave laughs nervously: "Guys, she's gone completely nuts."
+- 00:48.000 - 00:50.000 (1152-1200 frames): Dave smirking: "How could you say that?"
+- 00:50.000 - 00:51.584 (1200-1238 frames): Dave threatens: "I will estrange you from the baby."
+- 00:51.584 - 00:53.000 (1238-1272 frames): Woman pretends to beg: "Honey, forgive me! I was so wrong, sorry!"
+- 00:53.000 - 00:54.459 (1272-1307 frames): Woman cries dramatically at table.
+- 00:54.459 - 00:55.000 (1307-1320 frames): Dave walks away towards the door.
+- 00:55.000 - 00:56.000 (1320-1344 frames): Woman turns on baby monitor receiver.
+- 00:56.000 - 00:57.084 (1344-1370 frames): Woman holds up speaker device at table.
+- 00:57.084 - 00:58.000 (1370-1392 frames): Monitor broadcasts Dave: "You heard her!"
+- 00:58.000 - 00:59.000 (1392-1416 frames): Monitor broadcasts: "She knows that we're having an affair."
+- 00:59.000 - 01:00.000 (1416-1440 frames): Transmitter seen in Dave's back pocket: "No one will believe her."
+
+=====================
+HISSA 2 — MOVIE MAP TIME
+=====================
+- Short 00:00.000 - 00:20.917 --> NOT FOUND — Car trap aur departure ka scene is movie chunk me nahi hai.
+- Short 00:20.917 - 00:22.000 --> Movie 00:24.292 - 00:25.375 (583-609 frames)
+- Short 00:22.000 - 00:22.958 --> Movie 00:25.375 - 00:26.334 (609-632 frames)
+- Short 00:22.958 - 00:23.708 --> Movie 00:26.625 - 00:27.375 (639-657 frames)
+- Short 00:23.708 - 00:24.500 --> Movie 00:27.375 - 00:28.167 (657-676 frames)
+- Short 00:24.500 - 00:25.500 --> Movie 00:28.542 - 00:29.542 (685-709 frames)
+- Short 00:25.500 - 00:27.000 --> Movie 00:29.542 - 00:31.042 (709-745 frames)
+- Short 00:27.000 - 00:28.250 --> Movie 00:31.042 - 00:32.292 (745-775 frames)
+- Short 00:28.250 - 00:29.000 --> Movie 00:40.167 - 00:40.917 (964-982 frames)
+- Short 00:29.000 - 00:29.792 --> Movie 00:40.917 - 00:41.708 (982-1001 frames)
+- Short 00:29.792 - 00:31.000 --> Movie 00:46.292 - 00:47.500 (1111-1140 frames)
+- Short 00:31.000 - 00:32.250 --> Movie 00:47.500 - 00:48.750 (1140-1170 frames)
+- Short 00:32.250 - 00:32.625 --> Movie 00:51.500 - 00:51.875 (1236-1245 frames)
+- Short 00:32.625 - 00:33.875 --> Movie 00:54.875 - 00:56.125 (1317-1347 frames)
+- Short 00:33.875 - 00:34.667 --> Movie 00:56.209 - 00:57.000 (1349-1368 frames)
+- Short 00:34.667 - 01:00.000 --> NOT FOUND — Dinner party aur baby monitor revelation ka scene is movie chunk me nahi hai.

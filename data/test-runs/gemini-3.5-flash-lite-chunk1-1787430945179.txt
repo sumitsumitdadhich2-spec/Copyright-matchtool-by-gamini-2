@@ -1,0 +1,134 @@
+
+================================================================================
+MODEL: gemini-3.5-flash-lite   |   CHUNK 1 (1:00-2:00)   |   2026-08-22T20:35:26.000Z
+================================================================================
+
+TOKENS -> prompt: 191562 | output: 5762 | thoughts: 0 | total: 197324 | time: 19.2s
+
+=====================
+HISSA 1 — SHORT VIDEO TIME MAP
+=====================
+00:00.000 - 00:01.000 (00-24 frames): "I hugged my husband tightly,"
+00:01.000 - 00:02.000 (24-48 frames): "his heartbeat was thumping"
+00:02.000 - 00:03.000 (48-72 frames): "against my chest,"
+00:03.000 - 00:04.000 (72-96 frames): "while my hand secretly"
+00:04.000 - 00:05.000 (96-120 frames): "hid a board of razor-sharp steel spikes"
+00:05.000 - 00:06.000 (120-144 frames): "under his seat."
+00:06.000 - 00:07.000 (144-168 frames): "He had hurried"
+00:07.000 - 00:08.000 (168-192 frames): "away."
+00:08.000 - 00:09.000 (192-216 frames): "He had urgent business."
+00:09.000 - 00:10.000 (216-240 frames): "Yeah, I'm pretty sure. Urgent business."
+00:10.000 - 00:11.000 (240-264 frames): "But I knew he was lying."
+00:11.000 - 00:12.000 (264-288 frames): "I'll miss you like crazy."
+00:12.000 - 00:13.000 (288-312 frames): "Okay, so what's the problem?"
+00:13.000 - 00:14.000 (312-336 frames): "Hop in."
+00:14.000 - 00:15.000 (336-360 frames): "What? I stopped him from sitting on the spikes"
+00:15.000 - 00:16.000 (360-384 frames): "at the last second,"
+00:16.000 - 00:17.000 (384-408 frames): "pretending I forgot to turn off"
+00:17.000 - 00:18.000 (408-432 frames): "the kitchen water."
+00:18.000 - 00:19.000 (432-456 frames): "Okay, I guess I'll be off then."
+00:19.000 - 00:20.000 (456-480 frames): "When he drove off, I followed."
+00:20.000 - 00:21.000 (480-504 frames): "Let's see what kind of work stuff you really have."
+00:21.000 - 00:22.000 (504-528 frames): "As I saw him run into"
+00:22.000 - 00:23.000 (528-552 frames): "the arms of my best friend Ida,"
+00:23.000 - 00:24.000 (552-576 frames): "later..."
+00:24.000 - 00:25.000 (576-600 frames): "Ida, what happened?"
+00:25.000 - 00:26.000 (600-624 frames): "Ida limped up to me,"
+00:26.000 - 00:27.000 (624-648 frames): "lying that she fell at the gym."
+00:27.000 - 00:28.000 (648-672 frames): "I smiled,"
+00:28.000 - 00:29.000 (672-696 frames): "inviting her and her wealthy husband Ryan"
+00:29.000 - 00:30.000 (696-720 frames): "over for dinner tonight."
+00:30.000 - 00:31.000 (720-744 frames): "To ensure they came, I told them I was pregnant,"
+00:31.000 - 00:32.000 (744-768 frames): "but at the dinner table,"
+00:32.000 - 00:33.000 (768-792 frames): "Ryan raised a glass with a smile,"
+00:33.000 - 00:34.000 (792-816 frames): "unaware of my trap."
+00:34.000 - 00:35.000 (816-840 frames): "I stood up"
+00:35.000 - 00:36.000 (840-864 frames): "the baby isn't my husband's,"
+00:36.000 - 00:37.000 (864-888 frames): "I announced."
+00:37.000 - 00:38.000 (888-912 frames): "It's Ryan's. We have been dating secretly for a year."
+00:38.000 - 00:39.000 (912-936 frames): "And now, it's time for you,"
+00:39.000 - 00:40.000 (936-960 frames): "my husband Dave,"
+00:40.000 - 00:41.000 (960-984 frames): "to know the truth."
+00:41.000 - 00:42.000 (984-1008 frames): "He shouted that I was crazy,"
+00:42.000 - 00:43.000 (1008-1032 frames): "but I had secretly slipped a baby monitor transmitter"
+00:43.000 - 00:44.000 (1032-1056 frames): "into his pocket."
+00:44.000 - 00:45.000 (1056-1080 frames): "Ida ran to the bathroom"
+00:45.000 - 00:46.000 (1080-1104 frames): "and Dave followed."
+00:46.000 - 00:47.000 (1104-1128 frames): "I switched on the speaker at the table,"
+00:47.000 - 00:48.000 (1128-1152 frames): "the room froze as their whispers echoed."
+00:48.000 - 00:49.000 (1152-1176 frames): "Let her act crazy."
+00:49.000 - 00:50.000 (1176-1200 frames): "No one will believe her."
+00:50.000 - 00:51.000 (1200-1224 frames): "Two lines!"
+00:51.000 - 00:52.000 (1224-1248 frames): "Are you pregnant?"
+00:52.000 - 00:53.000 (1248-1272 frames): "I mean, um..."
+00:53.000 - 00:54.000 (1272-1296 frames): "It's wonderful news, honey."
+00:54.000 - 00:55.000 (1296-1320 frames): "I think I'm gonna call my mom."
+00:55.000 - 00:56.000 (1320-1344 frames): "It'll definitely make her day."
+00:56.000 - 00:57.000 (1344-1368 frames): "Ida, what happened?"
+00:57.000 - 00:58.000 (1368-1392 frames): "Oh!"
+00:58.000 - 00:59.000 (1392-1416 frames): "Uh... I fell at the gym."
+00:59.000 - 01:00.000 (1416-1440 frames): "Oh, really? Mm-hmm. But you said you were going for a manicure today."
+
+=====================
+HISSA 2 — MOVIE MAP TIME
+=====================
+Short 00:00.000 - 00:01.000 --> Movie 00:00.000 - 00:01.000 (00-24 frames)
+Short 00:01.000 - 00:02.000 --> Movie 00:01.000 - 00:02.000 (24-48 frames)
+Short 00:02.000 - 00:03.000 --> Movie 00:02.000 - 00:03.000 (48-72 frames)
+Short 00:03.000 - 00:04.000 --> Movie 00:03.000 - 00:04.000 (72-96 frames)
+Short 00:04.000 - 00:05.000 --> Movie 00:04.000 - 00:05.000 (96-120 frames)
+Short 00:05.000 - 00:06.000 --> Movie 00:05.792 - 00:06.792 (139-163 frames)
+Short 00:06.000 - 00:07.000 --> Movie 00:06.792 - 00:07.792 (163-187 frames)
+Short 00:07.000 - 00:08.000 --> Movie 00:07.792 - 00:08.792 (187-211 frames)
+Short 00:08.000 - 00:09.000 --> Movie 00:08.792 - 00:09.792 (211-235 frames)
+Short 00:09.000 - 00:10.000 --> Movie 00:09.000 - 00:10.000 (216-240 frames)
+Short 00:10.000 - 00:11.000 --> Movie 00:11.000 - 00:12.000 (264-288 frames)
+Short 00:11.000 - 00:12.000 --> Movie 00:11.917 - 00:12.917 (286-310 frames)
+Short 00:12.000 - 00:13.000 --> Movie 00:12.000 - 00:13.000 (288-312 frames)
+Short 00:13.000 - 00:14.000 --> Movie 00:13.958 - 00:14.958 (335-359 frames)
+Short 00:14.000 - 00:15.000 --> Movie 00:14.000 - 00:15.000 (336-360 frames)
+Short 00:15.000 - 00:16.000 --> Movie 00:15.000 - 00:16.000 (360-384 frames)
+Short 00:16.000 - 00:17.000 --> Movie 00:16.000 - 00:17.000 (384-408 frames)
+Short 00:17.000 - 00:18.000 --> Movie 00:17.000 - 00:18.000 (408-432 frames)
+Short 00:18.000 - 00:19.000 --> Movie 00:18.000 - 00:19.000 (432-456 frames)
+Short 00:19.000 - 00:20.000 --> Movie 00:19.000 - 00:20.000 (456-480 frames)
+Short 00:20.000 - 00:21.000 --> Movie 00:20.000 - 00:21.000 (480-504 frames)
+Short 00:21.000 - 00:22.000 --> Movie 00:21.000 - 00:22.000 (504-528 frames)
+Short 00:22.000 - 00:23.000 --> Movie 00:22.000 - 00:23.000 (528-552 frames)
+Short 00:23.000 - 00:24.000 --> Movie 00:23.000 - 00:24.000 (552-576 frames)
+Short 00:24.000 - 00:25.000 --> Movie 00:25.000 - 00:26.000 (600-624 frames)
+Short 00:25.000 - 00:26.000 --> Movie 00:26.000 - 00:27.000 (624-648 frames)
+Short 00:26.000 - 00:27.000 --> Movie 00:26.000 - 00:27.000 (624-648 frames)
+Short 00:27.000 - 00:28.000 --> Movie 00:28.000 - 00:29.000 (672-696 frames)
+Short 00:28.000 - 00:29.000 --> Movie 00:28.000 - 00:29.000 (672-696 frames)
+Short 00:29.000 - 00:30.000 --> Movie 00:29.000 - 00:30.000 (696-720 frames)
+Short 00:30.000 - 00:31.000 --> Movie 00:30.000 - 00:31.000 (720-744 frames)
+Short 00:31.000 - 00:32.000 --> Movie 00:31.000 - 00:32.000 (744-768 frames)
+Short 00:32.000 - 00:33.000 --> Movie 00:32.000 - 00:33.000 (768-792 frames)
+Short 00:33.000 - 00:34.000 --> Movie 00:33.000 - 00:34.000 (792-816 frames)
+Short 00:34.000 - 00:35.000 --> Movie 00:34.000 - 00:35.000 (816-840 frames)
+Short 00:35.000 - 00:36.000 --> Movie 00:35.000 - 00:36.000 (840-864 frames)
+Short 00:36.000 - 00:37.000 --> Movie 00:36.000 - 00:37.000 (864-888 frames)
+Short 00:37.000 - 00:38.000 --> Movie 00:37.000 - 00:38.000 (888-912 frames)
+Short 00:38.000 - 00:39.000 --> Movie 00:38.000 - 00:39.000 (912-936 frames)
+Short 00:39.000 - 00:40.000 --> Movie 00:39.000 - 00:40.000 (936-960 frames)
+Short 00:40.000 - 00:41.000 --> Movie 00:40.000 - 00:41.000 (960-984 frames)
+Short 00:41.000 - 00:42.000 --> Movie 00:41.000 - 00:42.000 (984-1008 frames)
+Short 00:42.000 - 00:43.000 --> Movie 00:42.000 - 00:43.000 (1008-1032 frames)
+Short 00:43.000 - 00:44.000 --> Movie 00:43.000 - 00:44.000 (1032-1056 frames)
+Short 00:44.000 - 00:45.000 --> Movie 00:44.000 - 00:45.000 (1056-1080 frames)
+Short 00:45.000 - 00:46.000 --> Movie 00:45.000 - 00:46.000 (1080-1104 frames)
+Short 00:46.000 - 00:47.000 --> Movie 00:46.000 - 00:47.000 (1104-1128 frames)
+Short 00:47.000 - 00:48.000 --> Movie 00:47.000 - 00:48.000 (1128-1152 frames)
+Short 00:48.000 - 00:49.000 --> Movie 00:48.000 - 00:49.000 (1152-1176 frames)
+Short 00:49.000 - 00:50.000 --> Movie 00:49.000 - 00:50.000 (1176-1200 frames)
+Short 00:50.000 - 00:51.000 --> Movie 00:00.000 - 00:01.000 (00-24 frames)
+Short 00:51.000 - 00:52.000 --> Movie 00:06.000 - 00:07.000 (144-168 frames)
+Short 00:52.000 - 00:53.000 --> Movie 00:08.000 - 00:09.000 (192-216 frames)
+Short 00:53.000 - 00:54.000 --> Movie 00:13.000 - 00:14.000 (312-336 frames)
+Short 00:54.000 - 00:55.000 --> Movie 00:16.000 - 00:17.000 (384-408 frames)
+Short 00:55.000 - 00:56.000 --> Movie 00:20.000 - 00:21.000 (480-504 frames)
+Short 00:56.000 - 00:57.000 --> Movie 00:25.000 - 00:26.000 (600-624 frames)
+Short 00:57.000 - 00:58.000 --> Movie 00:29.000 - 00:30.000 (696-720 frames)
+Short 00:58.000 - 00:59.000 --> Movie 00:33.000 - 00:34.000 (792-816 frames)
+Short 00:59.000 - 01:00.000 --> Movie 00:38.000 - 00:39.000 (912-936 frames)
