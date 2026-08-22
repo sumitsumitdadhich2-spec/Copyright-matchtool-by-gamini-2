@@ -155,6 +155,8 @@ export function newScan(): Scan {
     chunkingProgress: 0,
     chunks: [],
     matches: [],
+    // UI-only placeholder — candidate system removed, will be re-added later
+    candidates: [],
     logs: [],
     startedAt: null,
     finishedAt: null,

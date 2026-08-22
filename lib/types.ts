@@ -25,6 +25,8 @@ export interface ChunkState {
   status: ChunkStatus
   model?: string
   attempts: number
+  /** UI-only placeholder — candidate/verifier system removed, never set by the backend */
+  confidence?: number
   /** parsed HISSA 2 matches found inside THIS chunk (absolute movie seconds) */
   matches?: ChunkMatch[]
   /** full raw Gemini outputs produced for this chunk, oldest first */
@@ -43,9 +45,26 @@ export type ScanStatus =
   | 'chunking'
   | 'ready'
   | 'scanning'
+  /** UI-only placeholder status — verifier system removed, will be re-added later */
+  | 'verifying'
   | 'done'
   | 'stopped'
   | 'error'
+
+/** UI-ONLY placeholder type. The candidate system's backend has been removed
+ *  and will be re-implemented later — this type only keeps the Candidates
+ *  panel UI compiling and rendering exactly as before. */
+export interface Candidate {
+  id: string
+  /** [start, end] seconds within the short video */
+  shortSegment: [number, number]
+  /** [start, end] ABSOLUTE seconds within the full movie */
+  absSegment: [number, number]
+  chunkIndex: number
+  model: string
+  confidence: number
+  note?: string
+}
 
 export interface ModelLiveState {
   state: 'idle' | 'active' | 'cooling' | 'exhausted' | 'waiting'
@@ -78,6 +97,8 @@ export interface Scan {
   chunks: ChunkState[]
   /** all parsed matches across all chunks, sorted by shortStart (absolute movie seconds) */
   matches: ChunkMatch[]
+  /** UI-only: candidate system removed — backend never fills this, panel shows its empty state */
+  candidates?: Candidate[]
   logs: LogEntry[]
   startedAt: number | null
   finishedAt: number | null

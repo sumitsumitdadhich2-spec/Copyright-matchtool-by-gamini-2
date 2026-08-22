@@ -91,7 +91,7 @@ export function chunkPath(outDir: string, index: number): string {
   return path.join(outDir, `chunk-${String(index).padStart(4, '0')}.mp4`)
 }
 
-/** Extract a sub-segment from a video (used for the 24fps verification pass). */
+/** Extract a sub-clip from a video (used when trimming the short video on upload). */
 export async function extractSegment(
   sourceFile: string,
   start: number,
@@ -114,7 +114,7 @@ export async function extractSegment(
 export function cleanupChunks(outDir: string) {
   if (!fs.existsSync(outDir)) return
   for (const f of fs.readdirSync(outDir)) {
-    if (f.startsWith('chunk-') || f.startsWith('verify-')) {
+    if (f.startsWith('chunk-')) {
       try {
         fs.unlinkSync(path.join(outDir, f))
       } catch {
