@@ -1,6 +1,25 @@
 export type ChunkStatus = 'pending' | 'scanning' | 'no_match' | 'match' | 'failed' | 'cancelled'
 
-/** One parsed "Short X --> Movie Y" mapping line from the model's HISSA 2 output. */
+/** Live 24fps verification state of one match.
+ *  pending → verifying → confirmed | rejected. failed = verifier could not finish (quota/errors). */
+export type MatchVerifyState = 'pending' | 'verifying' | 'confirmed' | 'rejected' | 'failed'
+
+export interface MatchVerification {
+  state: MatchVerifyState
+  /** how many 24fps verification attempts have run for this match */
+  attempts: number
+  /** confidence (0-100) returned by the verifier's last verdict */
+  confidence?: number
+  /** model that produced the last verdict */
+  model?: string
+  /** which API key lane (1-5) ran the last verification */
+  keyLane?: number
+  /** verifier's reason (why it is / is not the same footage) */
+  reason?: string
+}
+
+/** One parsed "Short X --> Movie Y" mapping line from the model's HISSA 2 output.
+ *  Every match is a CANDIDATE until the 24fps verifier confirms or rejects it. */
 export interface ChunkMatch {
   /** seconds within the short video */
   shortStart: number
@@ -11,10 +30,14 @@ export interface ChunkMatch {
   /** which movie chunk this match was found in */
   chunkIndex: number
   model: string
+  /** 24fps verifier result; absent = never queued for verification */
+  verification?: MatchVerification
 }
 
 /** Full raw model output captured for a chunk request (for the UI expander). */
 export interface ChunkRawOutput {
+  /** scan = chunk-map request, verify = 24fps verification request */
+  kind?: 'scan' | 'verify'
   model: string
   t: number
   text: string
