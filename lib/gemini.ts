@@ -1,6 +1,17 @@
 import { GoogleGenAI } from '@google/genai'
-import { SCAN_FPS } from './models'
+import { SCAN_FPS, THINKING_LEVEL, MAX_OUTPUT_TOKENS } from './models'
 import type { ChunkMatch } from './types'
+
+/** Shared generation config for EVERY request:
+ * thinking level HIGH + max output tokens, always. */
+const GEN_CONFIG = {
+  temperature: 0,
+  maxOutputTokens: MAX_OUTPUT_TOKENS,
+  thinkingConfig: { thinkingLevel: THINKING_LEVEL },
+  // DEFAULT media resolution only (~65 tok/frame, measured). Never set
+  // mediaResolution: LOW/MEDIUM behave the same as default, and HIGH
+  // quadruples cost to ~257 tok/frame.
+} as const
 
 export type GeminiErrorKind = 'rpd' | 'rate' | 'unavailable' | 'other'
 
@@ -135,12 +146,7 @@ export async function mapChunkRequest(
           ] as never,
         },
       ],
-      config: {
-        temperature: 0,
-        // DEFAULT media resolution only (~65 tok/frame, measured). Never set
-        // mediaResolution: LOW/MEDIUM behave the same as default, and HIGH
-        // quadruples cost to ~257 tok/frame.
-      },
+      config: GEN_CONFIG,
     })
     const text = resp.text
     if (!text) throw new Error('Empty model response')
@@ -213,7 +219,7 @@ export async function verifyRequest(
           ] as never,
         },
       ],
-      config: { temperature: 0 },
+      config: GEN_CONFIG,
     })
     const text = resp.text
     if (!text) throw new Error('Empty verifier response')
@@ -243,7 +249,7 @@ export async function rescanRequest(
           ] as never,
         },
       ],
-      config: { temperature: 0 },
+      config: GEN_CONFIG,
     })
     const text = resp.text
     if (!text) throw new Error('Empty rescan response')
@@ -278,6 +284,33 @@ function parseTs(ts: string): number | null {
   if (!m) return null
   const sec = Number(m[1]) * 60 + Number(m[2])
   return Number.isFinite(sec) ? sec : null
+}
+
+/** FALSE-RESULT DETECTOR for chunk-map outputs. Returns a reason string when
+ * the output looks like a fabricated "same-2-same" A-to-Z mapping, else null.
+ *
+ * Signal 1 — NO "NOT FOUND" ANYWHERE: a real chunk-map answer almost always has
+ * NOT FOUND lines (the chunk is only 1 minute of the whole movie). If Gemini's
+ * output does not contain "NOT FOUND" even once, it mapped everything = false result.
+ *
+ * Signal 2 — FIXED-OFFSET EXTRAPOLATION: if every matched line follows the same
+ * constant offset (movieStart - shortStart), the model broke prompt rule 4
+ * (NO EXTRAPOLATION) and just applied "short_time + offset" A to Z. */
+export function isSuspiciousChunkOutput(raw: string, matches: ChunkMatch[]): string | null {
+  // Signal 1: not a single NOT FOUND line in the whole output.
+  if (!/NOT\s*FOUND/i.test(raw)) {
+    return 'output me kahin bhi NOT FOUND nahi hai — model ne sab kuch map kar diya (false result)'
+  }
+  // Signal 2: all matches share one fixed offset (extrapolation drift).
+  if (matches.length >= 4) {
+    const offsets = matches.map((m) => m.movieStart - m.shortStart)
+    const min = Math.min(...offsets)
+    const max = Math.max(...offsets)
+    if (max - min < 0.25) {
+      return `saare ${matches.length} matches ek hi fixed offset (+${min.toFixed(3)}s) par hain — extrapolated A-to-Z mapping (prompt rule 4 break)`
+    }
+  }
+  return null
 }
 
 /** Parse the HISSA 2 lines of a chunk-map response into matches.
