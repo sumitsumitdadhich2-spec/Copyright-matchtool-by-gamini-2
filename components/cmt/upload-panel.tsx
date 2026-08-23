@@ -72,6 +72,9 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
       xhr.onerror = () => {
         setUploading(null)
         setError('Upload failed — network error')
+        // The server may have finished the upload even if the connection dropped —
+        // refresh so a successful upload still shows up.
+        refresh()
       }
       xhr.send(file)
     })
