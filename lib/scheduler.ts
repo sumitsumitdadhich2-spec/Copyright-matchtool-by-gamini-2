@@ -8,6 +8,8 @@ import {
   VERIFY_MODEL_POOL,
   RESCAN_MODEL_POOL,
   isRescanModel,
+  PADDED_VERIFY_MODEL_POOL,
+  isPaddedVerifyModel,
   MAX_QUALITY_RETRIES,
   MODEL_MIN_INTERVAL_MS,
   RATE_COOLDOWN_MS,
@@ -580,6 +582,22 @@ class Scheduler {
       ? `IMPORTANT — PADDING NOTE (dhyan se padho):\nVideo 1 me asli TARGET SEGMENT sirf ${ts(tgtStart)} se ${ts(tgtEnd)} tak hai (Video 1 ki apni clock par). Uske pehle aur baad ka content sirf PADDING hai — context ke liye joda gaya hai. HISSA 1 me poora Video 1 map karo, lekin MATCH sirf TARGET window ${ts(tgtStart)}–${ts(tgtEnd)} ke liye do — matched movie window ki duration EXACTLY ${segDur.toFixed(3)}s honi chahiye (padding wali duration NAHI).`
       : undefined
 
+    // PADDED clips are LOCKED to gemini-3-flash-preview / gemini-3.5-flash /
+    // gemini-3.5-flash-lite for EVERY verify request (thinking HIGH is global).
+    // Use the worker's own model when it is one of the three, otherwise pick an
+    // available padded-verify model on this key. Non-padded verifies keep `m`.
+    const pickVerifyModel = (): ModelSpec => {
+      if (!needsPad || isPaddedVerifyModel(m.id)) return m
+      const vm = PADDED_VERIFY_MODEL_POOL.find((x) => getModelUsage(x.id, lane.apiKey) < x.rpd)
+      if (!vm) {
+        throw new GeminiError(
+          'other',
+          `Padded-verify models (${PADDED_VERIFY_MODEL_POOL.map((x) => x.id).join(', ')}) exhausted on key ${lane.idx} — group re-queued for another key`,
+        )
+      }
+      return vm
+    }
+
     g.status = 'verifying'
     this.mark(job)
 
@@ -607,13 +625,14 @@ class Scheduler {
         const movieClip = await uploadVideo(lane.ai, movieClipFile)
         uploadedNames.push(movieClip.name)
 
-        addLog(scan, 'info', `Verify: short ${ts(g.shortStart)}–${ts(g.shortEnd)} vs movie ${ts(c.movieStart)}–${ts(c.movieEnd)}${needsPad ? ' (padded)' : ''} on ${m.id} (key ${lane.idx})`)
+        const vm = pickVerifyModel()
+        addLog(scan, 'info', `Verify: short ${ts(g.shortStart)}–${ts(g.shortEnd)} vs movie ${ts(c.movieStart)}–${ts(c.movieEnd)}${needsPad ? ' (padded)' : ''} on ${vm.id} (key ${lane.idx})`)
         const clipSecs = shortDur + padBefore + padAfter + Math.max(1, c.movieEnd - c.movieStart) + padBefore + padAfter
-        const raw = await this.paceAndSend(job, lane, m, clipSecs, () => verifyRequest(lane.ai, m.id, shortClip.uri, movieClip.uri, verifyPadNote))
+        const raw = await this.paceAndSend(job, lane, vm, clipSecs, () => verifyRequest(lane.ai, vm.id, shortClip.uri, movieClip.uri, verifyPadNote))
         const v = parseVerdict(raw)
         if (!v) throw new GeminiError('other', 'Verifier gave no clear VERDICT line')
 
-        c.verifierModel = m.id
+        c.verifierModel = vm.id
         c.verifierReason = v.reason
         c.verdict = v.same ? 'same' : 'different'
         this.mark(job)
@@ -691,9 +710,10 @@ class Scheduler {
         const reUp = await uploadVideo(lane.ai, reFile)
         uploadedNames.push(reUp.name)
 
-        addLog(scan, 'info', `Re-verify rescan window movie ${ts(c.rescanMovieStart!)}–${ts(c.rescanMovieEnd!)}${needsPad ? ' (padded)' : ''} on ${m.id} (key ${lane.idx})`)
+        const rvm = pickVerifyModel()
+        addLog(scan, 'info', `Re-verify rescan window movie ${ts(c.rescanMovieStart!)}–${ts(c.rescanMovieEnd!)}${needsPad ? ' (padded)' : ''} on ${rvm.id} (key ${lane.idx})`)
         const reSecs = shortDur + padBefore + padAfter + Math.max(1, c.rescanMovieEnd! - c.rescanMovieStart!) + padBefore + padAfter
-        const raw2 = await this.paceAndSend(job, lane, m, reSecs, () => verifyRequest(lane.ai, m.id, shortClip.uri, reUp.uri, verifyPadNote))
+        const raw2 = await this.paceAndSend(job, lane, rvm, reSecs, () => verifyRequest(lane.ai, rvm.id, shortClip.uri, reUp.uri, verifyPadNote))
         const v2 = parseVerdict(raw2)
         if (!v2) throw new GeminiError('other', 'Verifier gave no clear VERDICT line (rescan window)')
 
