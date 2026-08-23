@@ -43,6 +43,41 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
     return j.id
   }
 
+  /** Check whether the upload actually landed on the server (the preview proxy can
+   * drop the XHR response AFTER the server finished saving the file). */
+  async function verifyUploadLanded(id: string, kind: Kind, fileName: string): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/scans/${id}`, { cache: 'no-store' })
+      if (!res.ok) return false
+      const s: Scan = await res.json()
+      return kind === 'short' ? s.shortName === fileName : s.movieName === fileName
+    } catch {
+      return false
+    }
+  }
+
+  /** Upload a single slice via XHR (gives real upload progress). */
+  function putSlice(
+    url: string,
+    blob: Blob,
+    onProgress: (loaded: number) => void,
+  ): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', url)
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded)
+      }
+      xhr.onload = () => resolve({ status: xhr.status, body: xhr.responseText })
+      xhr.onerror = () => reject(new Error('network'))
+      xhr.send(blob)
+    })
+  }
+
+  // 8MB slices: small enough that the preview/production proxy never drops the
+  // request, which is what made large movie uploads fail as one giant request.
+  const SLICE_BYTES = 8 * 1024 * 1024
+
   function uploadFile(kind: Kind, file: File) {
     if (!isAllowedVideo(file)) {
       setError('Only MP4, MOV, MKV or WebM video files are supported')
@@ -51,30 +86,73 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
     setError(null)
     setUploading(kind)
     setProgress(0)
-    void ensureScan().then((id) => {
-      // XHR gives real upload progress for multi-GB movies.
-      const xhr = new XMLHttpRequest()
-      xhr.open('PUT', `/api/scans/${id}/upload?kind=${kind}&name=${encodeURIComponent(file.name)}`)
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) setProgress(Math.round((e.loaded / e.total) * 100))
-      }
-      xhr.onload = () => {
-        setUploading(null)
-        if (xhr.status >= 400) {
-          try {
-            setError(JSON.parse(xhr.responseText).error || 'Upload failed')
-          } catch {
-            setError('Upload failed')
+
+    void (async () => {
+      try {
+        const id = await ensureScan()
+        const parts = Math.max(1, Math.ceil(file.size / SLICE_BYTES))
+        const base = `/api/scans/${id}/upload?kind=${kind}&name=${encodeURIComponent(file.name)}`
+
+        let part = 0
+        while (part < parts) {
+          const startByte = part * SLICE_BYTES
+          const blob = file.slice(startByte, Math.min(startByte + SLICE_BYTES, file.size))
+          const url = `${base}&part=${part}&parts=${parts}`
+          const isLast = part === parts - 1
+
+          let done = false
+          for (let attempt = 0; attempt < 3 && !done; attempt++) {
+            try {
+              const res = await putSlice(url, blob, (loaded) => {
+                setProgress(Math.min(99, Math.round(((startByte + loaded) / file.size) * 100)))
+              })
+              if (res.status < 400) {
+                done = true
+              } else if (res.status === 409) {
+                // Server expects a different slice (a retried slice already landed) — resync.
+                try {
+                  const expected = JSON.parse(res.body).expected
+                  if (Number.isInteger(expected)) {
+                    part = expected - 1 // -1 because the loop increments below
+                    done = true
+                  }
+                } catch {
+                  // fall through to retry
+                }
+              } else {
+                let msg = 'Upload failed'
+                try {
+                  msg = JSON.parse(res.body).error || msg
+                } catch {
+                  // keep default
+                }
+                throw new Error(msg)
+              }
+            } catch (err) {
+              if (err instanceof Error && err.message !== 'network') throw err
+              // Network drop — the proxy may have cut the response AFTER the server
+              // processed the slice. For the last slice, check if the whole upload landed.
+              if (isLast && (await verifyUploadLanded(id, kind, file.name))) {
+                done = true
+              } else if (attempt === 2) {
+                throw new Error('Upload failed — network error. Please try again.')
+              }
+              // otherwise: retry the same slice (server ignores duplicates)
+            }
           }
+          part++
         }
+
+        setProgress(100)
+        setUploading(null)
+        setError(null)
+        refresh()
+      } catch (err) {
+        setUploading(null)
+        setError(err instanceof Error ? err.message : 'Upload failed. Please try again.')
         refresh()
       }
-      xhr.onerror = () => {
-        setUploading(null)
-        setError('Upload failed — network error')
-      }
-      xhr.send(file)
-    })
+    })()
   }
 
   const chunking = scan?.status === 'chunking'
