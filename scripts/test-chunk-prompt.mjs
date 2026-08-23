@@ -157,7 +157,7 @@ async function main() {
   if (THINKING_BUDGET !== null) genConfig.thinkingConfig = { thinkingBudget: Number(THINKING_BUDGET) }
   if (THINKING_LEVEL !== null) genConfig.thinkingConfig = { thinkingLevel: THINKING_LEVEL.toUpperCase() }
 
-  console.log(`\n[request] model=${MODEL} | fps=${SCAN_FPS} | temperature=0 | thinking=${THINKING_LEVEL ?? THINKING_BUDGET ?? 'default'} | maxOutputTokens=${MAX_OUTPUT ?? 'default'}`)
+  console.log(`\n[request] model=${MODEL} | fps=${SCAN_FPS} | EXACT config sent to Gemini: ${JSON.stringify(genConfig)}`)
   const t0 = Date.now()
   const resp = await ai.models.generateContent({
     model: MODEL,
