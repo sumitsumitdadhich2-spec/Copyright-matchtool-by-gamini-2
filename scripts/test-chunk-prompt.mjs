@@ -48,6 +48,10 @@ const MODEL = arg('model', null)
 const CHUNK_INDEX = Number(arg('chunk', '1'))
 const SCAN_ID = arg('scan', 'fa10a62dcb5f4120')
 const KEY_SLOT = Number(arg('key', '1'))
+// Optional overrides: --thinking-budget <n|-1> (Gemini 2.5), --thinking-level <low|high> (Gemini 3), --max-output <n>
+const THINKING_BUDGET = arg('thinking-budget', null)
+const THINKING_LEVEL = arg('thinking-level', null)
+const MAX_OUTPUT = arg('max-output', null)
 
 // ---------- exact prompt from the app (read at runtime, never copied) ----------
 function readAppPrompt() {
@@ -148,7 +152,12 @@ async function main() {
   const shortUp = await uploadVideo(ai, shortFile, 'short video')
   const chunkUp = await uploadVideo(ai, chunkFile, `movie chunk ${CHUNK_INDEX} (${CHUNK_INDEX}:00 - ${CHUNK_INDEX + 1}:00)`)
 
-  console.log(`\n[request] model=${MODEL} | fps=${SCAN_FPS} | temperature=0 | media resolution=default (same as app)`)
+  const genConfig = { temperature: 0 }
+  if (MAX_OUTPUT) genConfig.maxOutputTokens = Number(MAX_OUTPUT)
+  if (THINKING_BUDGET !== null) genConfig.thinkingConfig = { thinkingBudget: Number(THINKING_BUDGET) }
+  if (THINKING_LEVEL !== null) genConfig.thinkingConfig = { thinkingLevel: THINKING_LEVEL.toUpperCase() }
+
+  console.log(`\n[request] model=${MODEL} | fps=${SCAN_FPS} | temperature=0 | thinking=${THINKING_LEVEL ?? THINKING_BUDGET ?? 'default'} | maxOutputTokens=${MAX_OUTPUT ?? 'default'}`)
   const t0 = Date.now()
   const resp = await ai.models.generateContent({
     model: MODEL,
@@ -162,7 +171,7 @@ async function main() {
         ],
       },
     ],
-    config: { temperature: 0 },
+    config: genConfig,
   })
   const secs = ((Date.now() - t0) / 1000).toFixed(1)
 
