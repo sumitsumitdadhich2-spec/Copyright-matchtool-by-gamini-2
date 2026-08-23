@@ -4,6 +4,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { getScan, saveScan, addLog, scanMediaDir } from '@/lib/store'
+import type { Scan } from '@/lib/types'
 import { probeDuration, chunkMovie, extractSegment } from '@/lib/ffmpeg'
 import { CHUNK_SECONDS } from '@/lib/models'
 
@@ -26,9 +27,75 @@ export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }
   const mediaDir = scanMediaDir(id)
   const dest = path.join(mediaDir, `${kind}.mp4`)
 
-  // Stream the request body straight to disk — movies can be gigabytes.
+  // Sliced upload: big files (movies) are sent as many small slices so the
+  // preview/production proxy never sees one huge long-running request body.
+  const partParam = url.searchParams.get('part')
+  const partsParam = url.searchParams.get('parts')
+
+  if (partParam !== null && partsParam !== null) {
+    const part = Number.parseInt(partParam, 10)
+    const parts = Number.parseInt(partsParam, 10)
+    if (!Number.isInteger(part) || !Number.isInteger(parts) || part < 0 || parts < 1 || part >= parts) {
+      return NextResponse.json({ error: 'Invalid part/parts' }, { status: 400 })
+    }
+
+    const tmp = path.join(mediaDir, `${kind}.uploading`)
+    const progressFile = path.join(mediaDir, `${kind}.uploading.next`)
+
+    // Part 0 always starts a fresh file. Later parts must arrive in order —
+    // if a slice was already written (a retry of a delivered slice), accept it as a no-op.
+    const expected = part === 0 ? 0 : readNextPart(progressFile)
+    if (part < expected) {
+      // Slice already landed (client retried after the proxy dropped the response).
+      return NextResponse.json({ ok: true, part, alreadyReceived: true })
+    }
+    if (part > expected) {
+      return NextResponse.json({ error: `Out of order slice: expected ${expected}, got ${part}`, expected }, { status: 409 })
+    }
+
+    await pipeline(
+      Readable.fromWeb(req.body as never),
+      fs.createWriteStream(tmp, { flags: part === 0 ? 'w' : 'a' }),
+    )
+    fs.writeFileSync(progressFile, String(part + 1))
+
+    if (part < parts - 1) {
+      return NextResponse.json({ ok: true, part })
+    }
+
+    // Last slice — assemble complete file and finalize.
+    fs.renameSync(tmp, dest)
+    try {
+      fs.unlinkSync(progressFile)
+    } catch {
+      // ignore
+    }
+    return finalizeUpload(scan, id, kind, name, dest, mediaDir)
+  }
+
+  // Single-shot upload (small files).
   await pipeline(Readable.fromWeb(req.body as never), fs.createWriteStream(dest))
-  let size = fs.statSync(dest).size
+  return finalizeUpload(scan, id, kind, name, dest, mediaDir)
+}
+
+function readNextPart(progressFile: string): number {
+  try {
+    const n = Number.parseInt(fs.readFileSync(progressFile, 'utf8').trim(), 10)
+    return Number.isInteger(n) && n >= 0 ? n : 0
+  } catch {
+    return 0
+  }
+}
+
+async function finalizeUpload(
+  scan: Scan,
+  id: string,
+  kind: 'short' | 'movie',
+  name: string,
+  dest: string,
+  mediaDir: string,
+) {
+  const size = fs.statSync(dest).size
 
   let duration: number
   try {
@@ -65,8 +132,8 @@ export async function PUT(req: Request, ctx: { params: Promise<{ id: string }> }
             s,
             'info',
             wasTrimmed
-              ? `Short clip was ${fmtDur(originalDur)} — auto-trimmed to first ${fmtDur(newDuration)} and re-encoded at 24 fps`
-              : `Short clip re-encoded at 24 fps (${fmtDur(newDuration)})`,
+              ? `Short clip was ${fmtDur(originalDur)} — auto-trimmed to first ${fmtDur(newDuration)} and compressed to 24 fps for scanning`
+              : `Short clip compressed to 24 fps for scanning (${fmtDur(newDuration)}) — original quality is not needed for matching`,
           )
           saveScan(s)
         }
