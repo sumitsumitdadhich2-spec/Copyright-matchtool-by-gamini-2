@@ -29,6 +29,20 @@ export const VERIFY_MODEL_POOL: ModelSpec[] = [
   { id: 'gemini-3.5-flash-lite', rpm: 10, rpd: 20 },
 ]
 
+/** RESCAN models (locked): ONLY gemini-3-flash-preview and gemini-3.5-flash are
+ * allowed to run rescan requests (full-chunk segment hunt). Lite models give
+ * weak rescan results, so they are BANNED from this phase. Thinking level HIGH
+ * and max output tokens apply globally to every request (see GEN_CONFIG). */
+export const RESCAN_MODEL_POOL: ModelSpec[] = [
+  { id: 'gemini-3-flash-preview', rpm: 5, rpd: 20 },
+  { id: 'gemini-3.5-flash', rpm: 5, rpd: 20 },
+]
+
+/** Is this model one of the two locked rescan models? */
+export function isRescanModel(id: string): boolean {
+  return RESCAN_MODEL_POOL.some((m) => m.id === id)
+}
+
 /** Full pool (chunk + verify) — used by the UI model board and reports. */
 export const MODEL_POOL: ModelSpec[] = [...CHUNK_MODEL_POOL, ...VERIFY_MODEL_POOL]
 
