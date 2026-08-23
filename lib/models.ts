@@ -43,6 +43,22 @@ export function isRescanModel(id: string): boolean {
   return RESCAN_MODEL_POOL.some((m) => m.id === id)
 }
 
+/** PADDED-VERIFY models (locked): when a short segment is PADDED (segment < 1.5s),
+ * ALL its verify / re-verify requests must run ONLY on these three models —
+ * gemini-3-flash-preview, gemini-3.5-flash, gemini-3.5-flash-lite. Other verify
+ * models are BANNED for padded clips. Thinking HIGH + max output tokens apply
+ * globally (see GEN_CONFIG). Non-padded verifies keep using the full verify pool. */
+export const PADDED_VERIFY_MODEL_POOL: ModelSpec[] = [
+  { id: 'gemini-3-flash-preview', rpm: 5, rpd: 20 },
+  { id: 'gemini-3.5-flash', rpm: 5, rpd: 20 },
+  { id: 'gemini-3.5-flash-lite', rpm: 10, rpd: 20 },
+]
+
+/** Is this model allowed to verify PADDED clips? */
+export function isPaddedVerifyModel(id: string): boolean {
+  return PADDED_VERIFY_MODEL_POOL.some((m) => m.id === id)
+}
+
 /** Full pool (chunk + verify) — used by the UI model board and reports. */
 export const MODEL_POOL: ModelSpec[] = [...CHUNK_MODEL_POOL, ...VERIFY_MODEL_POOL]
 
