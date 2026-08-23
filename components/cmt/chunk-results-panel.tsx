@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { useSWRConfig } from 'swr'
 import { ChevronDown, ChevronRight, Clock3, FileText, RotateCcw } from 'lucide-react'
 import type { Scan, ChunkState } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
@@ -37,11 +38,31 @@ export function ChunkResultsPanel({ scan }: { scan: Scan }) {
 
 function ChunkRow({ scan, chunk }: { scan: Scan; chunk: ChunkState }) {
   const [open, setOpen] = useState(false)
+  const [retrying, setRetrying] = useState(false)
+  const [retryError, setRetryError] = useState<string | null>(null)
+  const { mutate } = useSWRConfig()
   const base = chunk.index * CHUNK_SECONDS
   const end = Math.min(base + CHUNK_SECONDS, scan.movieDuration || base + CHUNK_SECONDS)
   const matches = chunk.matches || []
   const raws = chunk.rawOutputs || []
   const scanning = chunk.status === 'scanning'
+  const canRetry = !scanning && chunk.status !== 'pending'
+
+  async function retry() {
+    if (retrying) return
+    setRetrying(true)
+    setRetryError(null)
+    try {
+      const res = await fetch(`/api/scans/${scan.id}/chunks/${chunk.index}/retry`, { method: 'POST' })
+      const j = (await res.json()) as { ok: boolean; error?: string }
+      if (!j.ok) setRetryError(j.error || 'Retry failed')
+      void mutate(`/api/scans/${scan.id}`)
+    } catch {
+      setRetryError('Retry failed — network error')
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   return (
     <div className="rounded-md border border-border bg-background">
@@ -72,15 +93,30 @@ function ChunkRow({ scan, chunk }: { scan: Scan; chunk: ChunkState }) {
         </div>
         <button
           type="button"
+          onClick={() => void retry()}
+          disabled={!canRetry || retrying}
+          title="Is chunk ko dobara chunk models (gemini-3.6/3.7 flash) se map karwao"
+          className="ml-auto flex items-center gap-1 rounded-md border border-input px-2 py-1 text-[11px] font-medium hover:bg-secondary disabled:opacity-30"
+        >
+          <RotateCcw className={`size-3.5 ${retrying ? 'animate-spin' : ''}`} aria-hidden />
+          {retrying ? 'Retrying…' : 'Retry'}
+        </button>
+        <button
+          type="button"
           onClick={() => setOpen((v) => !v)}
           disabled={raws.length === 0}
           aria-expanded={open}
-          className="ml-auto flex items-center gap-1 rounded-md border border-input px-2 py-1 text-[11px] font-medium hover:bg-secondary disabled:opacity-30"
+          className="flex items-center gap-1 rounded-md border border-input px-2 py-1 text-[11px] font-medium hover:bg-secondary disabled:opacity-30"
         >
           {open ? <ChevronDown className="size-3.5" aria-hidden /> : <ChevronRight className="size-3.5" aria-hidden />}
           Gemini output {raws.length > 0 ? `(${raws.length})` : ''}
         </button>
       </div>
+      {retryError && (
+        <p className="border-t border-border px-3 py-1.5 text-[11px] text-destructive" role="alert">
+          {retryError}
+        </p>
+      )}
       {open && raws.length > 0 && (
         <div className="flex flex-col gap-2 border-t border-border px-3 py-2">
           {raws.map((r, i) => (

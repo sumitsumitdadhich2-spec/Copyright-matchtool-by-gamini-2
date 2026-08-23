@@ -1,5 +1,5 @@
-import { GoogleGenAI } from '@google/genai'
-import { SCAN_FPS, THINKING_LEVEL, MAX_OUTPUT_TOKENS } from './models'
+import { GoogleGenAI, ThinkingLevel } from '@google/genai'
+import { SCAN_FPS, MAX_OUTPUT_TOKENS } from './models'
 import type { ChunkMatch } from './types'
 
 /** Shared generation config for EVERY request:
@@ -7,7 +7,7 @@ import type { ChunkMatch } from './types'
 const GEN_CONFIG = {
   temperature: 0,
   maxOutputTokens: MAX_OUTPUT_TOKENS,
-  thinkingConfig: { thinkingLevel: THINKING_LEVEL },
+  thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
   // DEFAULT media resolution only (~65 tok/frame, measured). Never set
   // mediaResolution: LOW/MEDIUM behave the same as default, and HIGH
   // quadruples cost to ~257 tok/frame.
