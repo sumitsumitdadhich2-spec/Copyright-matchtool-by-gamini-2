@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { ChevronDown, ChevronRight, Clock3, FileText } from 'lucide-react'
+import { ChevronDown, ChevronRight, Clock3, FileText, RotateCcw } from 'lucide-react'
 import type { Scan, ChunkState } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
 

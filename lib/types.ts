@@ -33,6 +33,8 @@ export interface ChunkState {
   confidence?: number
   /** parsed HISSA 2 matches found inside THIS chunk (absolute movie seconds) */
   matches?: ChunkMatch[]
+  /** automatic quality retries used (false-result detector) — max 1 */
+  qualityRetries?: number
   /** full raw Gemini outputs produced for this chunk, oldest first */
   rawOutputs?: ChunkRawOutput[]
 }

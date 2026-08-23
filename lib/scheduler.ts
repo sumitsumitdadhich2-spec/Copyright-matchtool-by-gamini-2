@@ -2,7 +2,17 @@ import path from 'node:path'
 import fs from 'node:fs'
 import type { GoogleGenAI } from '@google/genai'
 import type { Scan, ChunkState, ChunkMatch, CandidateGroup } from './types'
-import { MODEL_POOL, MODEL_MIN_INTERVAL_MS, RATE_COOLDOWN_MS, CHUNK_SECONDS, pacingIntervalMs, type ModelSpec } from './models'
+import {
+  MODEL_POOL,
+  CHUNK_MODEL_POOL,
+  VERIFY_MODEL_POOL,
+  MAX_QUALITY_RETRIES,
+  MODEL_MIN_INTERVAL_MS,
+  RATE_COOLDOWN_MS,
+  CHUNK_SECONDS,
+  pacingIntervalMs,
+  type ModelSpec,
+} from './models'
 import {
   getScan,
   saveScan,
@@ -24,6 +34,7 @@ import {
   rescanRequest,
   parseVerdict,
   parseRescanMatch,
+  isSuspiciousChunkOutput,
   GeminiError,
   classifyError,
 } from './gemini'
@@ -132,7 +143,7 @@ class Scheduler {
       'info',
       resume
         ? `Resuming: ${queue.length} chunk(s) pending`
-        : `Scan started: ${queue.length} chunks queued across ${MODEL_POOL.length} models × ${lanes.length} API key(s) — one prompt per chunk`,
+        : `Scan started: ${queue.length} chunks queued across ${CHUNK_MODEL_POOL.length} chunk models (${CHUNK_MODEL_POOL.map((m) => m.id).join(', ')}) × ${lanes.length} API key(s) — one prompt per chunk`,
     )
 
     const job: Job = {
@@ -178,6 +189,46 @@ class Scheduler {
     addLog(job.scan, 'warn', 'Stop requested — finishing in-flight requests, counters saved')
     job.dirty = true
     return { ok: true }
+  }
+
+  /** MANUAL chunk retry: reset one chunk and re-run its mapping (chunk models only).
+   *  Works while a scan is running (re-queues on the live job) AND after it has
+   *  finished (restarts the scheduler in resume mode; the chunk file is re-cut
+   *  from the movie automatically if it was cleaned up). */
+  async retryChunk(scanId: string, chunkIndex: number): Promise<{ ok: boolean; error?: string }> {
+    const job = this.jobs.get(scanId)
+    const scan = job ? job.scan : getScan(scanId)
+    if (!scan) return { ok: false, error: 'Scan not found' }
+    const chunk = scan.chunks?.[chunkIndex]
+    if (!chunk) return { ok: false, error: `Chunk ${chunkIndex} not found` }
+    if (chunk.status === 'scanning' || job?.inFlight.has(chunkIndex)) {
+      return { ok: false, error: `Chunk ${chunkIndex} is currently in flight — wait for it to finish` }
+    }
+    if (job?.queue.includes(chunkIndex)) {
+      return { ok: false, error: `Chunk ${chunkIndex} is already queued` }
+    }
+
+    // Reset the chunk and wipe its old evidence.
+    chunk.status = 'pending'
+    chunk.attempts = 0
+    chunk.qualityRetries = 0
+    chunk.matches = []
+    scan.matches = (scan.matches || []).filter((mm) => mm.chunkIndex !== chunkIndex)
+    if (scan.candidateGroups?.length) {
+      scan.candidateGroups = scan.candidateGroups.filter((g) => !g.candidates.some((c) => c.chunkIndex === chunkIndex))
+    }
+    addLog(scan, 'info', `Manual retry: chunk ${chunkIndex} reset and re-queued for chunk-model mapping`)
+
+    if (job) {
+      job.queue.push(chunkIndex)
+      this.mark(job)
+      return { ok: true }
+    }
+
+    // No live job — persist the reset state and restart in resume mode.
+    if (scan.status === 'done' || scan.status === 'stopped' || scan.status === 'error') scan.status = 'stopped'
+    saveScan(scan)
+    return this.start(scanId, true)
   }
 
   private mark(job: Job) {
@@ -241,10 +292,11 @@ class Scheduler {
   private async runScan(job: Job) {
     const { scan } = job
 
-    // One worker per (key lane × model), all pulling from the shared chunk queue.
+    // CHUNK PHASE: one worker per (key lane × CHUNK model). ONLY gemini-3.6-flash
+    // and gemini-3.7-flash map chunks — all keys run both in parallel.
     const workers: Promise<void>[] = []
     for (const lane of job.lanes) {
-      for (const m of MODEL_POOL) workers.push(this.worker(job, lane, m))
+      for (const m of CHUNK_MODEL_POOL) workers.push(this.worker(job, lane, m))
     }
     await Promise.all(workers)
 
@@ -312,9 +364,13 @@ class Scheduler {
    *  same short-video segment (≥50% overlap) become candidates of ONE group.
    *  Candidates are unlimited — every distinct movie window is saved. */
   private buildCandidateGroups(scan: Scan) {
-    if (scan.candidateGroups?.length) return
-    const groups: CandidateGroup[] = []
-    const sorted = [...(scan.matches || [])].sort((a, b) => a.shortStart - b.shortStart || a.movieStart - b.movieStart)
+    // Incremental: existing groups are kept; only UNVERIFIED chunk-phase matches
+    // (verified === undefined) are grouped — so a manually retried chunk's fresh
+    // matches get queued for verification without re-verifying finished groups.
+    const groups: CandidateGroup[] = scan.candidateGroups || []
+    const sorted = [...(scan.matches || [])]
+      .filter((m) => m.verified === undefined)
+      .sort((a, b) => a.shortStart - b.shortStart || a.movieStart - b.movieStart)
     for (const m of sorted) {
       let g = groups.find((x) => sameShortSegment(x.shortStart, x.shortEnd, m.shortStart, m.shortEnd))
       if (!g) {
@@ -343,6 +399,8 @@ class Scheduler {
           verdict: 'pending',
           rescan: 'none',
         })
+        // New evidence for an already-finished group (manual chunk retry) — reopen it.
+        if (g.status === 'rejected' || g.status === 'unverified') g.status = 'pending'
       }
     }
     scan.candidateGroups = groups
@@ -372,13 +430,13 @@ class Scheduler {
     addLog(
       scan,
       'info',
-      `Verification phase: ${job.verifyQueue.length} candidate group(s) queued — verifier clips at 24 fps, distributed across ${job.lanes.length} API key(s) × ${MODEL_POOL.length} models`,
+      `Verification phase: ${job.verifyQueue.length} candidate group(s) queued — verifier clips at 24 fps, distributed across ${job.lanes.length} API key(s) × ${VERIFY_MODEL_POOL.length} verify models`,
     )
     this.mark(job)
 
     const workers: Promise<void>[] = []
     for (const lane of job.lanes) {
-      for (const m of MODEL_POOL) workers.push(this.verifyWorker(job, lane, m))
+      for (const m of VERIFY_MODEL_POOL) workers.push(this.verifyWorker(job, lane, m))
     }
     await Promise.all(workers)
 
@@ -754,7 +812,17 @@ class Scheduler {
         const shortUri = await this.ensureShortUri(job, lane)
 
         // Upload THIS chunk for THIS key (Files API uploads are per key).
-        const chunkFile = chunkPath(path.join(scanMediaDir(scan.id), 'chunks'), chunkIndex)
+        const chunksDir = path.join(scanMediaDir(scan.id), 'chunks')
+        const chunkFile = chunkPath(chunksDir, chunkIndex)
+        if (!fs.existsSync(chunkFile)) {
+          // Chunk files are cleaned up after a scan finishes — re-cut from the
+          // movie so a MANUAL chunk retry works even after completion.
+          const cs = chunkIndex * CHUNK_SECONDS
+          const ce = Math.min(cs + CHUNK_SECONDS, scan.movieDuration || cs + CHUNK_SECONDS)
+          fs.mkdirSync(chunksDir, { recursive: true })
+          addLog(scan, 'info', `Chunk ${chunkIndex}: chunk file missing — re-cutting ${cs}s–${ce}s from movie`)
+          await extractClipPrecise(path.join(scanMediaDir(scan.id), 'movie.mp4'), cs, ce, chunkFile)
+        }
         const uploaded = await uploadVideo(lane.ai, chunkFile)
         chunkFileName = uploaded.name
 
@@ -768,8 +836,25 @@ class Scheduler {
         this.recordChunkOutput(chunk, m.id, raw)
 
         const matches = parseChunkMatches(raw, chunkIndex, chunkIndex * CHUNK_SECONDS, m.id)
-        chunk.matches = matches
         chunk.attempts += 1
+
+        // FALSE-RESULT DETECTOR: no NOT FOUND anywhere / fixed-offset A-to-Z
+        // extrapolation => auto retry ONCE, then accept whatever comes.
+        const suspicion = isSuspiciousChunkOutput(raw, matches)
+        if (suspicion && (chunk.qualityRetries || 0) < MAX_QUALITY_RETRIES) {
+          chunk.qualityRetries = (chunk.qualityRetries || 0) + 1
+          chunk.status = 'pending'
+          chunk.matches = []
+          job.queue.push(chunkIndex)
+          addLog(scan, 'warn', `Chunk ${chunkIndex}: SUSPICIOUS output on ${m.id} — ${suspicion}. Auto-retry ${chunk.qualityRetries}/${MAX_QUALITY_RETRIES} queued`)
+          this.mark(job)
+          continue
+        }
+        if (suspicion) {
+          addLog(scan, 'warn', `Chunk ${chunkIndex}: output still suspicious after ${MAX_QUALITY_RETRIES} auto-retry (${suspicion}) — accepting result, use manual Retry if needed`)
+        }
+
+        chunk.matches = matches
         chunk.status = matches.length > 0 ? 'match' : 'no_match'
         this.mergeMatches(scan, chunkIndex, matches)
 
@@ -793,7 +878,7 @@ class Scheduler {
         } else {
           chunk.status = 'pending'
           job.queue.push(chunkIndex)
-          addLog(scan, 'warn', `Chunk ${chunkIndex} attempt ${chunk.attempts} failed on ${m.id} (key ${lane.idx}) — re-queued: ${e.message.slice(0, 120)}`)
+          addLog(scan, 'warn', `Chunk ${chunkIndex} attempt ${chunk.attempts} failed on ${m.id} (key ${lane.idx}) �� re-queued: ${e.message.slice(0, 120)}`)
         }
         this.mark(job)
       } finally {
