@@ -7,6 +7,8 @@ import { fmtTime, fmtBytes } from '@/lib/format'
 
 interface Props {
   scan: Scan | null
+  /** The dashboard's selected scan id — null means "new scan", so a fresh scan must be created on upload. */
+  selectedScanId: string | null
   onScanCreated: (id: string) => void
   refresh: () => void
 }
@@ -19,12 +21,18 @@ function isAllowedVideo(f: File) {
   return ALLOWED_EXT.some((ext) => name.endsWith(ext))
 }
 
-export function UploadPanel({ scan, onScanCreated, refresh }: Props) {
+export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Props) {
   const [uploading, setUploading] = useState<Kind | null>(null)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
-  const scanIdRef = useRef<string | null>(scan?.id || null)
-  scanIdRef.current = scan?.id || scanIdRef.current
+  const scanIdRef = useRef<string | null>(selectedScanId)
+  // Follow the dashboard's selection: when the user picks "New scan" (null) or
+  // another history entry, drop any stale id so uploads never land in an old scan.
+  const prevSelectedRef = useRef<string | null>(selectedScanId)
+  if (prevSelectedRef.current !== selectedScanId) {
+    prevSelectedRef.current = selectedScanId
+    scanIdRef.current = selectedScanId
+  }
 
   async function ensureScan(): Promise<string> {
     if (scanIdRef.current) return scanIdRef.current
