@@ -43,6 +43,19 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
     return j.id
   }
 
+  /** Check whether the upload actually landed on the server (the preview proxy can
+   * drop the XHR response AFTER the server finished saving the file). */
+  async function verifyUploadLanded(id: string, kind: Kind, fileName: string): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/scans/${id}`, { cache: 'no-store' })
+      if (!res.ok) return false
+      const s: Scan = await res.json()
+      return kind === 'short' ? s.shortName === fileName : s.movieName === fileName
+    } catch {
+      return false
+    }
+  }
+
   function uploadFile(kind: Kind, file: File) {
     if (!isAllowedVideo(file)) {
       setError('Only MP4, MOV, MKV or WebM video files are supported')
@@ -51,32 +64,50 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
     setError(null)
     setUploading(kind)
     setProgress(0)
+
     void ensureScan().then((id) => {
-      // XHR gives real upload progress for multi-GB movies.
-      const xhr = new XMLHttpRequest()
-      xhr.open('PUT', `/api/scans/${id}/upload?kind=${kind}&name=${encodeURIComponent(file.name)}`)
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) setProgress(Math.round((e.loaded / e.total) * 100))
-      }
-      xhr.onload = () => {
-        setUploading(null)
-        if (xhr.status >= 400) {
-          try {
-            setError(JSON.parse(xhr.responseText).error || 'Upload failed')
-          } catch {
-            setError('Upload failed')
-          }
+      const attempt = (retriesLeft: number) => {
+        // XHR gives real upload progress for multi-GB movies.
+        const xhr = new XMLHttpRequest()
+        xhr.open('PUT', `/api/scans/${id}/upload?kind=${kind}&name=${encodeURIComponent(file.name)}`)
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) setProgress(Math.round((e.loaded / e.total) * 100))
         }
-        refresh()
+        xhr.onload = () => {
+          setUploading(null)
+          if (xhr.status >= 400) {
+            try {
+              setError(JSON.parse(xhr.responseText).error || 'Upload failed')
+            } catch {
+              setError('Upload failed')
+            }
+          }
+          refresh()
+        }
+        xhr.onerror = () => {
+          // The proxy often drops the connection AFTER the server saved the file —
+          // verify with the server before declaring failure.
+          void verifyUploadLanded(id, kind, file.name).then((landed) => {
+            if (landed) {
+              setUploading(null)
+              setError(null)
+              refresh()
+              return
+            }
+            if (retriesLeft > 0) {
+              // Genuine network hiccup — retry the upload automatically once.
+              setProgress(0)
+              attempt(retriesLeft - 1)
+              return
+            }
+            setUploading(null)
+            setError('Upload failed — network error. Please try again.')
+            refresh()
+          })
+        }
+        xhr.send(file)
       }
-      xhr.onerror = () => {
-        setUploading(null)
-        setError('Upload failed — network error')
-        // The server may have finished the upload even if the connection dropped —
-        // refresh so a successful upload still shows up.
-        refresh()
-      }
-      xhr.send(file)
+      attempt(1)
     })
   }
 
