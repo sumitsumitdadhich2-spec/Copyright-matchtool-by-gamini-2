@@ -48,6 +48,8 @@ const MODEL = arg('model', null)
 const CHUNK_INDEX = Number(arg('chunk', '1'))
 const SCAN_ID = arg('scan', 'fa10a62dcb5f4120')
 const KEY_SLOT = Number(arg('key', '1'))
+const THINKING = arg('thinking', null) // e.g. HIGH / LOW / MINIMAL (Gemini 3 models only)
+const MAX_OUTPUT = arg('max-output', null) // e.g. 65536
 
 // ---------- exact prompt from the app (read at runtime, never copied) ----------
 function readAppPrompt() {
@@ -148,7 +150,11 @@ async function main() {
   const shortUp = await uploadVideo(ai, shortFile, 'short video')
   const chunkUp = await uploadVideo(ai, chunkFile, `movie chunk ${CHUNK_INDEX} (${CHUNK_INDEX}:00 - ${CHUNK_INDEX + 1}:00)`)
 
-  console.log(`\n[request] model=${MODEL} | fps=${SCAN_FPS} | temperature=0 | media resolution=default (same as app)`)
+  const config = { temperature: 0 }
+  if (THINKING) config.thinkingConfig = { thinkingLevel: THINKING.toUpperCase() }
+  if (MAX_OUTPUT) config.maxOutputTokens = Number(MAX_OUTPUT)
+
+  console.log(`\n[request] model=${MODEL} | fps=${SCAN_FPS} | temperature=0 | thinking=${THINKING || 'default'} | maxOutputTokens=${MAX_OUTPUT || 'default'} | media resolution=default`)
   const t0 = Date.now()
   const resp = await ai.models.generateContent({
     model: MODEL,
@@ -162,7 +168,7 @@ async function main() {
         ],
       },
     ],
-    config: { temperature: 0 },
+    config,
   })
   const secs = ((Date.now() - t0) / 1000).toFixed(1)
 
