@@ -6,6 +6,8 @@ import {
   MODEL_POOL,
   CHUNK_MODEL_POOL,
   VERIFY_MODEL_POOL,
+  RESCAN_MODEL_POOL,
+  isRescanModel,
   MAX_QUALITY_RETRIES,
   MODEL_MIN_INTERVAL_MS,
   RATE_COOLDOWN_MS,
@@ -557,12 +559,37 @@ class Scheduler {
     if (!fs.existsSync(clipsDir)) fs.mkdirSync(clipsDir, { recursive: true })
     const shortDur = Math.max(1, g.shortEnd - g.shortStart)
 
+    // ---- PADDING (only for very small segments) ----
+    // Segments shorter than 1.5s are too small for Gemini to compare reliably
+    // (a 0.4s clip is ~10 frames). Pad BOTH clips equally on each side so the
+    // model gets enough context, and tell it EXACTLY where the real target
+    // window sits inside the padded clips (so extra padded scenes never confuse it).
+    // Final report timestamps stay ORIGINAL — padding is for verification only.
+    const segDur = g.shortEnd - g.shortStart
+    const needsPad = segDur < 1.5
+    const PAD_EACH = 0.75
+    const shortTotal = scan.shortDuration || g.shortEnd
+    const padBefore = needsPad ? Math.min(PAD_EACH, Math.max(0, g.shortStart)) : 0
+    const padAfter = needsPad ? Math.min(PAD_EACH, Math.max(0, shortTotal - g.shortEnd)) : 0
+    const tgtStart = padBefore
+    const tgtEnd = padBefore + segDur
+    const verifyPadNote = needsPad
+      ? `IMPORTANT — PADDING NOTE (dhyan se padho):\nDono clips me asli TARGET SEGMENT sirf ${ts(tgtStart)} se ${ts(tgtEnd)} tak hai (har clip ki apni clock par). Is window ke pehle aur baad ka content sirf PADDING hai jo context ke liye joda gaya hai — wahan alag scene ho sakta hai, us se CONFUSE mat hona. SAME/DIFFERENT ka faisla SIRF target window ${ts(tgtStart)}–${ts(tgtEnd)} ke frames aur audio par karo. Agar target window ka footage exact same hai to VERDICT: SAME do, chahe padding area me kuch bhi ho.`
+      : undefined
+    const rescanPadNote = needsPad
+      ? `IMPORTANT — PADDING NOTE (dhyan se padho):\nVideo 1 me asli TARGET SEGMENT sirf ${ts(tgtStart)} se ${ts(tgtEnd)} tak hai (Video 1 ki apni clock par). Uske pehle aur baad ka content sirf PADDING hai — context ke liye joda gaya hai. HISSA 1 me poora Video 1 map karo, lekin MATCH sirf TARGET window ${ts(tgtStart)}–${ts(tgtEnd)} ke liye do — matched movie window ki duration EXACTLY ${segDur.toFixed(3)}s honi chahiye (padding wali duration NAHI).`
+      : undefined
+
     g.status = 'verifying'
     this.mark(job)
 
     // Cut + upload the short-video segment ONCE for this group (per-key upload).
+    // Small segments are cut WITH padding; the padding note tells the model where the target is.
     const shortClipFile = path.join(clipsDir, `${g.id}-short.mp4`)
-    await extractClipPrecise(path.join(mediaDir, 'short.mp4'), g.shortStart, g.shortEnd, shortClipFile)
+    await extractClipPrecise(path.join(mediaDir, 'short.mp4'), g.shortStart - padBefore, g.shortEnd + padAfter, shortClipFile)
+    if (needsPad) {
+      addLog(scan, 'info', `Padding: short segment ${ts(g.shortStart)}–${ts(g.shortEnd)} is only ${segDur.toFixed(3)}s — clips padded (+${padBefore.toFixed(3)}s / +${padAfter.toFixed(3)}s), target window written into the prompt`)
+    }
     const shortClip = await uploadVideo(lane.ai, shortClipFile)
     const uploadedNames: string[] = [shortClip.name]
 
@@ -576,13 +603,13 @@ class Scheduler {
         this.mark(job)
 
         const movieClipFile = path.join(clipsDir, `${g.id}-c${i}-movie.mp4`)
-        await extractClipPrecise(path.join(mediaDir, 'movie.mp4'), c.movieStart, c.movieEnd, movieClipFile)
+        await extractClipPrecise(path.join(mediaDir, 'movie.mp4'), Math.max(0, c.movieStart - padBefore), c.movieEnd + padAfter, movieClipFile)
         const movieClip = await uploadVideo(lane.ai, movieClipFile)
         uploadedNames.push(movieClip.name)
 
-        addLog(scan, 'info', `Verify: short ${ts(g.shortStart)}–${ts(g.shortEnd)} vs movie ${ts(c.movieStart)}–${ts(c.movieEnd)} on ${m.id} (key ${lane.idx})`)
-        const clipSecs = shortDur + Math.max(1, c.movieEnd - c.movieStart)
-        const raw = await this.paceAndSend(job, lane, m, clipSecs, () => verifyRequest(lane.ai, m.id, shortClip.uri, movieClip.uri))
+        addLog(scan, 'info', `Verify: short ${ts(g.shortStart)}–${ts(g.shortEnd)} vs movie ${ts(c.movieStart)}–${ts(c.movieEnd)}${needsPad ? ' (padded)' : ''} on ${m.id} (key ${lane.idx})`)
+        const clipSecs = shortDur + padBefore + padAfter + Math.max(1, c.movieEnd - c.movieStart) + padBefore + padAfter
+        const raw = await this.paceAndSend(job, lane, m, clipSecs, () => verifyRequest(lane.ai, m.id, shortClip.uri, movieClip.uri, verifyPadNote))
         const v = parseVerdict(raw)
         if (!v) throw new GeminiError('other', 'Verifier gave no clear VERDICT line')
 
@@ -628,8 +655,21 @@ class Scheduler {
           const chunkUp = await uploadVideo(lane.ai, chunkFile)
           uploadedNames.push(chunkUp.name)
 
-          addLog(scan, 'info', `Rescan: hunting short ${ts(g.shortStart)}–${ts(g.shortEnd)} inside full chunk ${c.chunkIndex} on ${m.id} (key ${lane.idx})`)
-          const raw = await this.paceAndSend(job, lane, m, shortDur + (chunkEnd - chunkStart), () => rescanRequest(lane.ai, m.id, shortClip.uri, chunkUp.uri))
+          // RESCAN is LOCKED to gemini-3-flash-preview / gemini-3.5-flash only —
+          // lite models give weak rescan results. Use the worker's own model when
+          // it is one of the two, otherwise pick an available rescan model on this key.
+          const rm = isRescanModel(m.id)
+            ? m
+            : RESCAN_MODEL_POOL.find((x) => getModelUsage(x.id, lane.apiKey) < x.rpd)
+          if (!rm) {
+            throw new GeminiError(
+              'other',
+              `Rescan models (${RESCAN_MODEL_POOL.map((x) => x.id).join(', ')}) exhausted on key ${lane.idx} — group re-queued for another key`,
+            )
+          }
+
+          addLog(scan, 'info', `Rescan: hunting short ${ts(g.shortStart)}–${ts(g.shortEnd)} inside full chunk ${c.chunkIndex} on ${rm.id} (key ${lane.idx})`)
+          const raw = await this.paceAndSend(job, lane, rm, shortDur + padBefore + padAfter + (chunkEnd - chunkStart), () => rescanRequest(lane.ai, rm.id, shortClip.uri, chunkUp.uri, rescanPadNote))
           const found = parseRescanMatch(raw)
           if (!found) {
             c.rescan = 'not_found'
@@ -647,13 +687,13 @@ class Scheduler {
         c.rescanVerdict = 'verifying'
         this.mark(job)
         const reFile = path.join(clipsDir, `${g.id}-c${i}-rescan.mp4`)
-        await extractClipPrecise(path.join(mediaDir, 'movie.mp4'), c.rescanMovieStart!, c.rescanMovieEnd!, reFile)
+        await extractClipPrecise(path.join(mediaDir, 'movie.mp4'), Math.max(0, c.rescanMovieStart! - padBefore), c.rescanMovieEnd! + padAfter, reFile)
         const reUp = await uploadVideo(lane.ai, reFile)
         uploadedNames.push(reUp.name)
 
-        addLog(scan, 'info', `Re-verify rescan window movie ${ts(c.rescanMovieStart!)}–${ts(c.rescanMovieEnd!)} on ${m.id} (key ${lane.idx})`)
-        const reSecs = shortDur + Math.max(1, c.rescanMovieEnd! - c.rescanMovieStart!)
-        const raw2 = await this.paceAndSend(job, lane, m, reSecs, () => verifyRequest(lane.ai, m.id, shortClip.uri, reUp.uri))
+        addLog(scan, 'info', `Re-verify rescan window movie ${ts(c.rescanMovieStart!)}–${ts(c.rescanMovieEnd!)}${needsPad ? ' (padded)' : ''} on ${m.id} (key ${lane.idx})`)
+        const reSecs = shortDur + padBefore + padAfter + Math.max(1, c.rescanMovieEnd! - c.rescanMovieStart!) + padBefore + padAfter
+        const raw2 = await this.paceAndSend(job, lane, m, reSecs, () => verifyRequest(lane.ai, m.id, shortClip.uri, reUp.uri, verifyPadNote))
         const v2 = parseVerdict(raw2)
         if (!v2) throw new GeminiError('other', 'Verifier gave no clear VERDICT line (rescan window)')
 

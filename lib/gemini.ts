@@ -179,32 +179,59 @@ ya
 VERDICT: DIFFERENT
 REASON: <ek chhoti line Hinglish me>`
 
-/** Special prompt for a RESCAN: one failed short segment + the full 1-minute chunk it was claimed in. */
-export const RESCAN_PROMPT = `You are a forensic video analyst. You are given TWO videos. Both are exactly 24 fps — analyze frame by frame at 24 fps precision.
+/** Special prompt for a RESCAN: one failed short segment + the full 1-minute chunk it was claimed in.
+ * Structured like the chunk-map prompt (HISSA 1 time map + HISSA 2 hunt) for maximum accuracy. */
+export const RESCAN_PROMPT = `You are a forensic video analyst. You are given TWO videos:
+- Video 1: ek chhota TARGET SEGMENT jo ek SHORT VIDEO se kata gaya hai.
+- Video 2: ek ONE-MINUTE CHUNK jo original movie se kata gaya hai.
 
-- Video 1: ek chhota TARGET SEGMENT (ek short video se kata hua).
-- Video 2: ek ONE-MINUTE CHUNK jo ek movie se kata gaya hai.
+Both videos are exactly 24 fps. Analyze them frame by frame at 24 fps precision.
 
-TASK: Video 2 ke andar EXACT wahi footage dhundho jo Video 1 me hai — same recording, frame-for-frame. Sirf similar scene hona kaafi NAHI hai.
+Respond in Hinglish (Hindi written in Latin script). Spoken dialogue must always be QUOTED VERBATIM in its original language.
+
+Your answer has exactly TWO parts:
+
+=====================
+HISSA 1 — TARGET SEGMENT TIME MAP
+=====================
+Watch Video 1 from start to finish and break it into small, fine-grained segments:
+- Har segment chhota hona chahiye — zyada tar 1 second ya usse kam. Ek continuous shot ko bhi chhote sub-segments me todo.
+- Har line ka format:
+  mm:ss.mmm - mm:ss.mmm (startFrame-endFrame frames): <SHORT description, max 10-12 words; agar koi bolta hai to sirf exact quoted words>
+- Frame numbers = timestamp x 24 (24 fps). Timestamps millisecond precision me.
+- Dialogue sabse strong fingerprint hai — kabhi summarize mat karo, hamesha exact words quote karo.
+
+=====================
+HISSA 2 — MOVIE CHUNK ME HUNT
+=====================
+Ab poora Video 2 shuru se aakhir tak frame-by-frame scan karke EXACT wahi footage dhundho jo Video 1 ka target hai (same recording, frame for frame — sirf similar scene nahi).
 
 STRICT RULES:
-1. Poora Video 2 shuru se aakhir tak frame-by-frame scan karo. Koi shortcut nahi.
-2. Matched window ki duration EXACTLY Video 1 ki duration ke barabar honi chahiye — na kam, na zyada.
-3. DIALOGUE VERIFICATION: agar Video 1 me koi dialogue hai, to wahi EXACT words Video 2 ki audio me usi window par actually sunai dene chahiye. Words sunai nahi dete = match INVALID.
-4. SIMILAR IS NOT SAME: same actors/location par different moment ya different take = NOT FOUND.
-5. AGAR YE SEGMENT VIDEO 2 ME NAHI HAI, TO SAAF MANA KAR DO — "NOT FOUND" likho. Zabardasti match banana STRICTLY FORBIDDEN hai. NOT FOUND ek bilkul valid aur expected answer hai. Doubt ho to NOT FOUND.
+1. Poora Video 2 shuru se aakhir tak scan karo. Koi shortcut nahi.
+2. Matched window ki duration EXACTLY Video 1 ke target ki duration ke barabar honi chahiye — na kam, na zyada.
+3. Movie timestamps Video 2 ki APNI clock se aane chahiye (00:00.000 se ~01:00.000) — frames ko actually dekh kar. Video 1 ke timestamps copy karke daalna FORBIDDEN hai.
+4. NO EXTRAPOLATION / NO GUESSING (CRITICAL): Kisi bhi formula, offset, ya andaze se timestamp banana STRICTLY FORBIDDEN hai. Sirf wahi window report karo jiske frames tumne Video 2 me khud dekhe aur verify kiye hain.
+5. DIALOGUE AUDIO VERIFICATION: Agar Video 1 me koi dialogue hai, to matched window me WAHI EXACT dialogue Video 2 ke audio me us position par actually SUNAI dena chahiye. Words sunai nahi dete = match INVALID — NOT FOUND likho.
+6. SIMILAR IS NOT SAME: same actors, same location, same costume par different moment ya different take = NOT FOUND.
+7. NOT FOUND: Agar target Video 2 me NAHI hai, to saaf mana kar do. Zabardasti match banana false positive hai, jo miss karne se bahut zyada bura hai. NOT FOUND ek bilkul valid aur expected answer hai. Doubt ho to NOT FOUND.
+8. FINAL SELF-CHECK: Answer dene se pehle apna MATCH dobara verify karo — kya wo window ke frames aur audio sach me Video 1 ke target se frame-for-frame match karte hain? Agar frame evidence nahi hai, to NOT FOUND me badlo.
 
-Answer EXACTLY ek line me (Video 2 ki apni clock par, 00:00.000 se ~01:00.000):
+HISSA 2 ke end me aakhri line EXACTLY is format me do (Video 2 ki apni clock par):
 MATCH: mm:ss.mmm - mm:ss.mmm
 ya
-NOT FOUND — <chhota reason>`
+NOT FOUND — <chhota reason>
 
-/** One verifier request: short-segment clip + movie-window clip, both @ 24 fps. */
+Poore answer me sirf HISSA 1 aur HISSA 2 do, aur kuch nahi.`
+
+/** One verifier request: short-segment clip + movie-window clip, both @ 24 fps.
+ * `paddingNote` (optional) is appended to the prompt when the clips were padded,
+ * telling the model EXACTLY where the real target window sits inside each clip. */
 export async function verifyRequest(
   ai: GoogleGenAI,
   model: string,
   shortClipUri: string,
   movieClipUri: string,
+  paddingNote?: string,
 ): Promise<string> {
   try {
     const resp = await ai.models.generateContent({
@@ -215,7 +242,7 @@ export async function verifyRequest(
           parts: [
             { fileData: { fileUri: shortClipUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
             { fileData: { fileUri: movieClipUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
-            { text: VERIFY_PROMPT },
+            { text: paddingNote ? `${VERIFY_PROMPT}\n${paddingNote}` : VERIFY_PROMPT },
           ] as never,
         },
       ],
@@ -229,12 +256,15 @@ export async function verifyRequest(
   }
 }
 
-/** One rescan request: failed short-segment clip + the full 1-minute chunk, both @ 24 fps. */
+/** One rescan request: failed short-segment clip + the full 1-minute chunk, both @ 24 fps.
+ * `paddingNote` (optional) is appended when the segment clip was padded, telling the
+ * model EXACTLY where the real target window sits inside Video 1. */
 export async function rescanRequest(
   ai: GoogleGenAI,
   model: string,
   segmentClipUri: string,
   chunkUri: string,
+  paddingNote?: string,
 ): Promise<string> {
   try {
     const resp = await ai.models.generateContent({
@@ -245,7 +275,7 @@ export async function rescanRequest(
           parts: [
             { fileData: { fileUri: segmentClipUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
             { fileData: { fileUri: chunkUri, mimeType: 'video/mp4' }, videoMetadata: { fps: SCAN_FPS } },
-            { text: RESCAN_PROMPT },
+            { text: paddingNote ? `${RESCAN_PROMPT}\n${paddingNote}` : RESCAN_PROMPT },
           ] as never,
         },
       ],
