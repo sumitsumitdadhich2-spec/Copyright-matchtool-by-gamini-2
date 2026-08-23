@@ -50,6 +50,7 @@ const SCAN_ID = arg('scan', 'fa10a62dcb5f4120')
 const KEY_SLOT = Number(arg('key', '1'))
 const THINKING = arg('thinking', null) // e.g. HIGH / LOW / MINIMAL (Gemini 3 models only)
 const MAX_OUTPUT = arg('max-output', null) // e.g. 65536
+const THINKING_BUDGET = arg('thinking-budget', null) // e.g. 55000 — caps thinking tokens so answer tokens remain
 
 // ---------- exact prompt from the app (read at runtime, never copied) ----------
 function readAppPrompt() {
@@ -151,10 +152,14 @@ async function main() {
   const chunkUp = await uploadVideo(ai, chunkFile, `movie chunk ${CHUNK_INDEX} (${CHUNK_INDEX}:00 - ${CHUNK_INDEX + 1}:00)`)
 
   const config = { temperature: 0 }
-  if (THINKING) config.thinkingConfig = { thinkingLevel: THINKING.toUpperCase() }
+  if (THINKING || THINKING_BUDGET) {
+    config.thinkingConfig = {}
+    if (THINKING) config.thinkingConfig.thinkingLevel = THINKING.toUpperCase()
+    if (THINKING_BUDGET) config.thinkingConfig.thinkingBudget = Number(THINKING_BUDGET)
+  }
   if (MAX_OUTPUT) config.maxOutputTokens = Number(MAX_OUTPUT)
 
-  console.log(`\n[request] model=${MODEL} | fps=${SCAN_FPS} | temperature=0 | thinking=${THINKING || 'default'} | maxOutputTokens=${MAX_OUTPUT || 'default'} | media resolution=default`)
+  console.log(`\n[request] model=${MODEL} | fps=${SCAN_FPS} | temperature=0 | thinking=${THINKING || 'default'} | thinkingBudget=${THINKING_BUDGET || 'default'} | maxOutputTokens=${MAX_OUTPUT || 'default'} | media resolution=default`)
   const t0 = Date.now()
   const resp = await ai.models.generateContent({
     model: MODEL,
