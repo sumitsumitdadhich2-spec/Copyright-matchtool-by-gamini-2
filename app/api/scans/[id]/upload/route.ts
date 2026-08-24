@@ -5,7 +5,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { getScan, saveScan, addLog, scanMediaDir } from '@/lib/store'
 import type { Scan } from '@/lib/types'
-import { probeDuration, chunkMovie, extractSegment } from '@/lib/ffmpeg'
+import { probeDuration, chunkMovie, chunkShort, cleanupSegments } from '@/lib/ffmpeg'
 import { CHUNK_SECONDS } from '@/lib/models'
 
 export const runtime = 'nodejs'
@@ -107,45 +107,63 @@ async function finalizeUpload(
 
   if (kind === 'short') {
     // Record the upload immediately and respond fast — the preview/production proxy
-    // drops long-running requests, so the 24 fps re-encode MUST happen in the background.
+    // drops long-running requests. The ORIGINAL short.mp4 is NEVER overwritten:
+    // preview, verifier clips and the render pipeline all use it at full quality.
+    // Scanning uses separate re-encoded 1-minute segment files cut in the background.
     scan.shortName = name
     scan.shortSize = size
     scan.shortDuration = duration
-    addLog(scan, 'info', `Short video uploaded: ${name} (${fmtDur(duration)})`)
+    const segCount = Math.max(1, Math.ceil(duration / CHUNK_SECONDS))
+    scan.shortSegments = Array.from({ length: segCount }, (_, i) => ({
+      index: i,
+      start: i * CHUNK_SECONDS,
+      end: Math.min((i + 1) * CHUNK_SECONDS, duration),
+      status: 'pending' as const,
+      chunks: [],
+    }))
+    scan.currentShortSegment = 0
+    scan.shortSegmentingProgress = 0
+    addLog(
+      scan,
+      'info',
+      segCount > 1
+        ? `Short video uploaded: ${name} (${fmtDur(duration)}) — will be scanned minute-by-minute (${segCount} segments), original quality preserved`
+        : `Short video uploaded: ${name} (${fmtDur(duration)}) — original quality preserved, scan copy cut in background`,
+    )
     saveScan(scan)
 
-    // Background: ALWAYS re-encode the short video to 24 fps (trim to first minute when longer).
-    const originalDur = duration
-    const wasTrimmed = duration > CHUNK_SECONDS + 1
-    const reencoded = path.join(mediaDir, 'short-24fps.mp4')
+    // Background: cut 24 fps / 640px scan segments (seg-0000.mp4, ...) — original untouched.
+    const segDir = path.join(mediaDir, 'segments')
     void (async () => {
       try {
-        await extractSegment(dest, 0, Math.min(originalDur, CHUNK_SECONDS), reencoded)
-        fs.renameSync(reencoded, dest)
-        const newSize = fs.statSync(dest).size
-        const newDuration = await probeDuration(dest)
+        cleanupSegments(segDir)
+        const actual = await chunkShort(dest, segDir, duration, (pct) => {
+          const s = getScan(id)
+          if (s) {
+            s.shortSegmentingProgress = pct
+            saveScan(s)
+          }
+        })
         const s = getScan(id)
         if (s) {
-          s.shortSize = newSize
-          s.shortDuration = newDuration
-          addLog(
-            s,
-            'info',
-            wasTrimmed
-              ? `Short clip was ${fmtDur(originalDur)} — auto-trimmed to first ${fmtDur(newDuration)} and compressed to 24 fps for scanning`
-              : `Short clip compressed to 24 fps for scanning (${fmtDur(newDuration)}) — original quality is not needed for matching`,
-          )
+          s.shortSegmentingProgress = 100
+          if (actual !== s.shortSegments?.length) {
+            s.shortSegments = Array.from({ length: actual }, (_, i) => ({
+              index: i,
+              start: i * CHUNK_SECONDS,
+              end: Math.min((i + 1) * CHUNK_SECONDS, duration),
+              status: 'pending' as const,
+              chunks: [],
+            }))
+          }
+          addLog(s, 'success', `Short scan segments ready: ${actual} × 1-minute file(s) at 24 fps`)
           saveScan(s)
         }
       } catch (err) {
-        try {
-          if (fs.existsSync(reencoded)) fs.unlinkSync(reencoded)
-        } catch {
-          // ignore
-        }
         const s = getScan(id)
         if (s) {
-          addLog(s, 'warn', `24 fps re-encode failed, keeping original ${fmtDur(originalDur)} clip: ${err instanceof Error ? err.message : String(err)}`)
+          s.shortSegmentingProgress = 100
+          addLog(s, 'warn', `Short segment cutting failed (segments will be re-cut on demand during the scan): ${err instanceof Error ? err.message : String(err)}`)
           saveScan(s)
         }
       }

@@ -94,6 +94,73 @@ export function chunkPath(outDir: string, index: number): string {
   return path.join(outDir, `chunk-${String(index).padStart(4, '0')}.mp4`)
 }
 
+/**
+ * Cut the SHORT video into exact sequential 1-minute scan segments (seg-0000.mp4, ...).
+ * Same encode params as movie chunks (24 fps / 640px / CRF 28) — these files are
+ * ONLY for scanning; the original short.mp4 is never touched.
+ */
+export async function chunkShort(
+  shortFile: string,
+  outDir: string,
+  duration: number,
+  onProgress: (pct: number) => void,
+): Promise<number> {
+  if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true })
+  const pattern = path.join(outDir, 'seg-%04d.mp4')
+  await run(
+    FFMPEG,
+    [
+      '-y',
+      '-i', shortFile,
+      '-vf', `scale=640:-2,fps=${SCAN_FPS_STR}`,
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+      '-force_key_frames', `expr:gte(t,n_forced*${CHUNK_SECONDS})`,
+      '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
+      '-f', 'segment',
+      '-segment_time', String(CHUNK_SECONDS),
+      '-reset_timestamps', '1',
+      pattern,
+    ],
+    (line) => {
+      const t = parseFfmpegTime(line)
+      if (t !== null) onProgress(Math.min(99, Math.round((t / duration) * 100)))
+    },
+  )
+  onProgress(100)
+  return fs.readdirSync(outDir).filter((f) => f.startsWith('seg-') && f.endsWith('.mp4')).length
+}
+
+export function segmentPath(outDir: string, index: number): string {
+  return path.join(outDir, `seg-${String(index).padStart(4, '0')}.mp4`)
+}
+
+/** Remove all short-segment scan files. */
+export function cleanupSegments(outDir: string) {
+  if (!fs.existsSync(outDir)) return
+  for (const f of fs.readdirSync(outDir)) {
+    if (f.startsWith('seg-')) {
+      try {
+        fs.unlinkSync(path.join(outDir, f))
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+// ---------- Render/export helpers (used by lib/render.ts) ----------
+
+/** Absolute path to the bundled ffmpeg binary (render pipeline spawns its own process for kill support). */
+export const FFMPEG_BIN = FFMPEG
+
+/** Parse an ffmpeg progress line into { time, speed } (either may be null). */
+export function parseFfmpegProgress(line: string): { time: number | null; speed: number | null } {
+  const time = parseFfmpegTime(line)
+  const sm = line.match(/speed=\s*(\d+(?:\.\d+)?)x/)
+  const speed = sm ? Number.parseFloat(sm[1]) : null
+  return { time, speed }
+}
+
 /** Extract a sub-clip from a video (used when trimming the short video on upload). Output is 24 fps. */
 export async function extractSegment(
   sourceFile: string,
