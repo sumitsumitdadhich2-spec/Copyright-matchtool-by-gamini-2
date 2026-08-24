@@ -100,12 +100,25 @@ function ChunkRow({ scan, chunk, segIdx }: { scan: Scan; chunk: ChunkState; segI
   const [retrying, setRetrying] = useState(false)
   const [retryError, setRetryError] = useState<string | null>(null)
   const { mutate } = useSWRConfig()
-  const base = chunk.index * CHUNK_SECONDS
-  const end = Math.min(base + CHUNK_SECONDS, scan.movieDuration || base + CHUNK_SECONDS)
+  // TRIM OFFSET: chunks cover ONLY the confirmed trim range, so absolute
+  // original-movie time = trimStart + index * 60 (capped at trimEnd).
+  const trimStart = scan.movieTrimStart ?? 0
+  const rangeEnd = scan.movieTrimEnd ?? scan.movieDuration ?? Number.POSITIVE_INFINITY
+  const base = trimStart + chunk.index * CHUNK_SECONDS
+  const end = Math.min(base + CHUNK_SECONDS, rangeEnd)
   const matches = chunk.matches || []
   const raws = chunk.rawOutputs || []
   const scanning = chunk.status === 'scanning'
-  const canRetry = !scanning && chunk.status !== 'pending'
+  // RESCAN LOCK (UI): retry stays disabled while ANY candidate group is still
+  // pending/verifying/rescanning — verification queue must fully drain first.
+  const pendingVerify = (scan.candidateGroups || []).filter(
+    (g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning',
+  ).length
+  const canRetry = !scanning && chunk.status !== 'pending' && pendingVerify === 0
+  const retryTitle =
+    pendingVerify > 0
+      ? `Verification in progress — ${pendingVerify} candidate group(s) pending. Rescan tabhi milega jab saare candidates verify ho jayen.`
+      : 'Is chunk ko dobara chunk models se map karwao'
 
   async function retry() {
     if (retrying) return
@@ -155,11 +168,11 @@ function ChunkRow({ scan, chunk, segIdx }: { scan: Scan; chunk: ChunkState; segI
           type="button"
           onClick={() => void retry()}
           disabled={!canRetry || retrying}
-          title="Is chunk ko dobara chunk models (gemini-3.6/3.7 flash) se map karwao"
+          title={retryTitle}
           className="ml-auto flex items-center gap-1 rounded-md border border-input px-2 py-1 text-[11px] font-medium hover:bg-secondary disabled:opacity-30"
         >
           <RotateCcw className={`size-3.5 ${retrying ? 'animate-spin' : ''}`} aria-hidden />
-          {retrying ? 'Retrying…' : 'Retry'}
+          {retrying ? 'Retrying…' : pendingVerify > 0 ? `Verify pending (${pendingVerify})` : 'Retry'}
         </button>
         <button
           type="button"

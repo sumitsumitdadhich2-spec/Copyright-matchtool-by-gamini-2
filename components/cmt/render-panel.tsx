@@ -32,6 +32,11 @@ export function RenderPanel({ scan }: { scan: Scan }) {
   const [bitrateTouched, setBitrateTouched] = useState(false)
   const [actionBusy, setActionBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  // ---- Blob-based download state (never navigates the page) ----
+  const [downloading, setDownloading] = useState(false)
+  const [downloadPct, setDownloadPct] = useState<number | null>(null)
+  const [downloadedBytes, setDownloadedBytes] = useState(0)
+  const [downloadError, setDownloadError] = useState<string | null>(null)
   const { mutate } = useSWRConfig()
 
   function pickResolution(r: RenderResolution) {
@@ -74,6 +79,63 @@ export function RenderPanel({ scan }: { scan: Scan }) {
       void mutate(`/api/scans/${scan.id}`)
     } finally {
       setActionBusy(false)
+    }
+  }
+
+  /** Same-origin fetch → Blob → programmatic <a download> click. NEVER uses
+   *  window.open or a direct top-level navigation to the API route (that path
+   *  gets blocked by preview auth with an "Unauthorized" redirect). */
+  async function downloadRender() {
+    if (downloading) return
+    setDownloading(true)
+    setDownloadError(null)
+    setDownloadPct(0)
+    setDownloadedBytes(0)
+    let objectUrl: string | null = null
+    try {
+      const res = await fetch(`/api/scans/${scan.id}/render/download?download=1`, { credentials: 'same-origin' })
+      if (!res.ok) {
+        setDownloadError(res.status === 404 ? 'Rendered file not found — render dobara chalao' : `Download failed (HTTP ${res.status})`)
+        return
+      }
+      const total = Number(res.headers.get('Content-Length') || 0)
+      let blob: Blob
+      if (res.body && total > 0) {
+        // Stream with progress (file can be large).
+        const reader = res.body.getReader()
+        const parts: BlobPart[] = []
+        let received = 0
+        for (;;) {
+          const { done: rdone, value } = await reader.read()
+          if (rdone) break
+          if (value) {
+            parts.push(value)
+            received += value.byteLength
+            setDownloadedBytes(received)
+            setDownloadPct(Math.min(100, Math.round((received / total) * 100)))
+          }
+        }
+        blob = new Blob(parts, { type: 'video/mp4' })
+      } else {
+        blob = await res.blob()
+        setDownloadPct(100)
+        setDownloadedBytes(blob.size)
+      }
+      const baseName = (scan.movieName || 'render').replace(/\.[^.]+$/, '')
+      const fileName = `${baseName}-stitched-${job?.settings?.resolution || 'export'}.mp4`.replace(/[^\w.\- ]+/g, '_')
+      objectUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = objectUrl
+      a.download = fileName
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+    } catch {
+      setDownloadError('Download failed — network error. Dobara try karo.')
+    } finally {
+      if (objectUrl) setTimeout(() => URL.revokeObjectURL(objectUrl as string), 10_000)
+      setDownloading(false)
+      setDownloadPct(null)
     }
   }
 
@@ -230,14 +292,41 @@ export function RenderPanel({ scan }: { scan: Scan }) {
                   {job.settings.resolution} · {job.settings.fps}fps · {job.settings.videoBitrateKbps}k
                 </span>
               )}
-              <a
-                href={`${downloadBase}?download=1`}
-                download
-                className="ml-auto flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground"
+              <button
+                type="button"
+                onClick={() => void downloadRender()}
+                disabled={downloading}
+                className="ml-auto flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-60"
               >
-                <Download className="size-3.5" aria-hidden /> Download MP4
-              </a>
+                {downloading ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Download className="size-3.5" aria-hidden />}
+                {downloading ? `Downloading… ${downloadPct ?? 0}%` : 'Download MP4'}
+              </button>
             </div>
+            {downloading && (
+              <div>
+                <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                  <span>Fetching rendered file (same-origin, blob save)…</span>
+                  <span className="font-mono">
+                    {fmtBytes(downloadedBytes)}
+                    {job.fileSize ? ` / ${fmtBytes(job.fileSize)}` : ''}
+                  </span>
+                </div>
+                <div
+                  className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted"
+                  role="progressbar"
+                  aria-valuenow={downloadPct ?? 0}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${downloadPct ?? 0}%` }} />
+                </div>
+              </div>
+            )}
+            {downloadError && (
+              <p role="alert" className="text-xs text-destructive">
+                {downloadError}
+              </p>
+            )}
             <video
               key={job.finishedAt ?? 0}
               src={downloadBase}
