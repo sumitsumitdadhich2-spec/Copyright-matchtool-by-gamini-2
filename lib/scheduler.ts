@@ -990,6 +990,9 @@ class Scheduler {
 
       const chunk = scan.chunks[chunkIndex]
       if (!chunk || chunk.status !== 'pending') continue
+      const seg = job.seg
+      if (!seg) return
+      const minutePrefix = (scan.shortSegments?.length ?? 0) > 1 ? `Minute ${seg.index + 1} · ` : ''
       job.inFlight.add(chunkIndex)
       chunk.status = 'scanning'
       chunk.model = m.id
@@ -1010,7 +1013,9 @@ class Scheduler {
           this.mark(job)
         }
 
-        const shortUri = await this.ensureShortUri(job, lane)
+        // The uploaded SHORT file is the current minute's re-encoded segment
+        // (uploaded once per key lane per minute; original short.mp4 untouched).
+        const shortUri = await this.ensureSegmentUri(job, lane, seg)
 
         // Upload THIS chunk for THIS key (Files API uploads are per key).
         const chunksDir = path.join(scanMediaDir(scan.id), 'chunks')
@@ -1032,11 +1037,17 @@ class Scheduler {
         st.usedToday = used
         this.mark(job)
 
-        addLog(scan, 'info', `Chunk ${chunkIndex}: mapping short → movie minute ${chunkIndex} on ${m.id} (key ${lane.idx})`)
+        addLog(scan, 'info', `${minutePrefix}Chunk ${chunkIndex}: mapping short → movie minute ${chunkIndex} on ${m.id} (key ${lane.idx})`)
         const raw = await mapChunkRequest(lane.ai, m.id, shortUri, uploaded.uri)
         this.recordChunkOutput(chunk, m.id, raw)
 
-        const matches = parseChunkMatches(raw, chunkIndex, chunkIndex * CHUNK_SECONDS, m.id)
+        // Model timestamps are LOCAL to the 1-minute segment file — shift them by
+        // seg.start so every stored match carries ABSOLUTE short-video seconds.
+        const matches = parseChunkMatches(raw, chunkIndex, chunkIndex * CHUNK_SECONDS, m.id).map((mm) => ({
+          ...mm,
+          shortStart: mm.shortStart + seg.start,
+          shortEnd: mm.shortEnd + seg.start,
+        }))
         chunk.attempts += 1
 
         // FALSE-RESULT DETECTOR: no NOT FOUND anywhere / fixed-offset A-to-Z
@@ -1047,7 +1058,7 @@ class Scheduler {
           chunk.status = 'pending'
           chunk.matches = []
           job.queue.push(chunkIndex)
-          addLog(scan, 'warn', `Chunk ${chunkIndex}: SUSPICIOUS output on ${m.id} — ${suspicion}. Auto-retry ${chunk.qualityRetries}/${MAX_QUALITY_RETRIES} queued`)
+          addLog(scan, 'warn', `${minutePrefix}Chunk ${chunkIndex}: SUSPICIOUS output on ${m.id} — ${suspicion}. Auto-retry ${chunk.qualityRetries}/${MAX_QUALITY_RETRIES} queued`)
           this.mark(job)
           continue
         }
@@ -1057,12 +1068,12 @@ class Scheduler {
 
         chunk.matches = matches
         chunk.status = matches.length > 0 ? 'match' : 'no_match'
-        this.mergeMatches(scan, chunkIndex, matches)
+        this.mergeMatches(scan, chunkIndex, matches, seg)
 
         if (matches.length > 0) {
-          addLog(scan, 'success', `Chunk ${chunkIndex}: ${matches.length} matched segment(s) found`)
+          addLog(scan, 'success', `${minutePrefix}Chunk ${chunkIndex}: ${matches.length} matched segment(s) found`)
         } else {
-          addLog(scan, 'info', `Chunk ${chunkIndex}: no segments found in this minute`)
+          addLog(scan, 'info', `${minutePrefix}Chunk ${chunkIndex}: no segments found in this minute`)
         }
         this.mark(job)
       } catch (err) {
@@ -1075,7 +1086,7 @@ class Scheduler {
         }
         if (chunk.attempts >= MAX_CHUNK_ATTEMPTS) {
           chunk.status = 'failed'
-          addLog(scan, 'error', `Chunk ${chunkIndex} failed after ${chunk.attempts} attempt(s): ${e.message.slice(0, 140)}`)
+          addLog(scan, 'error', `${minutePrefix}Chunk ${chunkIndex} failed after ${chunk.attempts} attempt(s): ${e.message.slice(0, 140)}`)
         } else {
           chunk.status = 'pending'
           job.queue.push(chunkIndex)
