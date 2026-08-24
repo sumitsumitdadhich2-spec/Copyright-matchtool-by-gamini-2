@@ -4,47 +4,9 @@ import path from 'node:path'
 import { FFMPEG_BIN, parseFfmpegProgress, probeDuration, probeHasAudio } from './ffmpeg'
 import { getScan, saveScan, scanMediaDir, addLog } from './store'
 import type { RenderJob, RenderResolution, RenderSettings, Scan } from './types'
+import { buildRenderSegments, totalStitchedSeconds } from './render-segments'
 
-// ---------- Stitched segment list (single source of truth for preview + export) ----------
-
-export interface RenderSegment {
-  /** absolute seconds within the ORIGINAL movie */
-  movieStart: number
-  movieEnd: number
-  /** absolute seconds within the short (ordering key) */
-  shortStart: number
-  shortEnd: number
-}
-
-/**
- * Build the ordered list of movie scenes to stitch together, in short order.
- * Matches are sorted by shortStart; overlapping/duplicate short windows are de-duped
- * (first match wins). Unverified kept matches are included.
- * The SAME list drives the instant preview and the ffmpeg export, so they never diverge.
- */
-export function buildRenderSegments(scan: Scan): RenderSegment[] {
-  const matches = [...(scan.matches || [])]
-    .filter((m) => m.movieEnd - m.movieStart > 0.05)
-    .sort((a, b) => a.shortStart - b.shortStart || a.movieStart - b.movieStart)
-
-  const out: RenderSegment[] = []
-  for (const m of matches) {
-    const last = out[out.length - 1]
-    // de-dupe: skip matches whose short window overlaps the previously kept one
-    if (last && m.shortStart < last.shortEnd - 0.25) continue
-    out.push({
-      movieStart: m.movieStart,
-      movieEnd: m.movieEnd,
-      shortStart: m.shortStart,
-      shortEnd: m.shortEnd,
-    })
-  }
-  return out
-}
-
-export function totalStitchedSeconds(segments: RenderSegment[]): number {
-  return segments.reduce((acc, s) => acc + Math.max(0, s.movieEnd - s.movieStart), 0)
-}
+export { buildRenderSegments } from './render-segments'
 
 // ---------- Settings validation ----------
 

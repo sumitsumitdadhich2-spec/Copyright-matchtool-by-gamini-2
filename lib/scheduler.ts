@@ -802,7 +802,7 @@ class Scheduler {
 
           // Reuse the original chunk file if it still exists, else cut it fresh from the movie.
           let chunkFile = chunkPath(path.join(mediaDir, 'chunks'), c.chunkIndex)
-          if (!fs.existsSync(chunkFile)) {
+          if (!fs.existsSync(/*turbopackIgnore: true*/ chunkFile)) {
             chunkFile = path.join(clipsDir, `${g.id}-c${i}-chunk.mp4`)
             await extractClipPrecise(path.join(mediaDir, 'movie.mp4'), chunkStart, chunkEnd, chunkFile)
           }

@@ -5,29 +5,7 @@ import { useSWRConfig } from 'swr'
 import { Clapperboard, Download, Loader2, Pause, Play, RotateCcw, Square, X } from 'lucide-react'
 import type { Scan, RenderResolution } from '@/lib/types'
 import { fmtTime, fmtBytes } from '@/lib/format'
-
-/** Ordered movie scenes to stitch, in short order. MUST mirror
- *  buildRenderSegments() in lib/render.ts (that file is server-only —
- *  it spawns ffmpeg — so the pure logic is duplicated here). */
-interface StitchSegment {
-  movieStart: number
-  movieEnd: number
-  shortStart: number
-  shortEnd: number
-}
-
-function buildStitchSegments(scan: Scan): StitchSegment[] {
-  const matches = [...(scan.matches || [])]
-    .filter((m) => m.movieEnd - m.movieStart > 0.05)
-    .sort((a, b) => a.shortStart - b.shortStart || a.movieStart - b.movieStart)
-  const out: StitchSegment[] = []
-  for (const m of matches) {
-    const last = out[out.length - 1]
-    if (last && m.shortStart < last.shortEnd - 0.25) continue
-    out.push({ movieStart: m.movieStart, movieEnd: m.movieEnd, shortStart: m.shortStart, shortEnd: m.shortEnd })
-  }
-  return out
-}
+import { buildRenderSegments, type RenderSegment } from '@/lib/render-segments'
 
 const RESOLUTIONS: { value: RenderResolution; label: string; defaultKbps: number }[] = [
   { value: '480p', label: '480p (854×480)', defaultKbps: 2000 },
@@ -40,7 +18,7 @@ const RESOLUTIONS: { value: RenderResolution; label: string; defaultKbps: number
 const AUDIO_BITRATES = [96, 128, 192, 256, 320]
 
 export function RenderPanel({ scan }: { scan: Scan }) {
-  const segments = useMemo(() => buildStitchSegments(scan), [scan.matches])
+  const segments = useMemo(() => buildRenderSegments(scan), [scan])
   const totalSeconds = useMemo(
     () => segments.reduce((acc, s) => acc + Math.max(0, s.movieEnd - s.movieStart), 0),
     [segments],
@@ -283,7 +261,7 @@ function StitchedPreview({
   totalSeconds,
 }: {
   scan: Scan
-  segments: StitchSegment[]
+  segments: RenderSegment[]
   totalSeconds: number
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
