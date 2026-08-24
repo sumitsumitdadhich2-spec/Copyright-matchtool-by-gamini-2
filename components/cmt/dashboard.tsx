@@ -14,6 +14,7 @@ import { CandidatesPanel } from './candidates-panel'
 import { LogsPanel } from './logs-panel'
 import { ReportPanel } from './report-panel'
 import { ComparePanel } from './compare-panel'
+import { RenderPanel } from './render-panel'
 import { HistoryPanel } from './history-panel'
 
 interface ScanResponse {
@@ -31,7 +32,10 @@ export function Dashboard() {
   const { data, mutate } = useSWR<ScanResponse>(scanId ? `/api/scans/${scanId}` : null, fetcher, {
     refreshInterval: (latest) => {
       const st = latest?.scan?.status
-      return st === 'scanning' || st === 'chunking' || latest?.running ? 1500 : 5000
+      const rendering = latest?.scan?.renderJob?.status === 'rendering'
+      const segmenting =
+        latest?.scan?.shortSegmentingProgress !== undefined && latest.scan.shortSegmentingProgress < 100
+      return st === 'scanning' || st === 'chunking' || latest?.running || rendering || segmenting ? 1500 : 5000
     },
   })
 
@@ -40,8 +44,19 @@ export function Dashboard() {
   const status = scan?.status
 
   const canStart = Boolean(scan && !running && status === 'ready' && scan.chunkCount > 0)
+  // Segments-aware: any incomplete minute (or any resumable chunk inside one) allows Resume.
+  const hasResumableWork = Boolean(
+    scan &&
+      (scan.shortSegments?.length
+        ? scan.shortSegments.some(
+            (seg) =>
+              seg.status !== 'done' ||
+              seg.chunks.some((c) => c.status === 'pending' || c.status === 'scanning' || c.status === 'cancelled'),
+          )
+        : scan.chunks.some((c) => c.status === 'pending' || c.status === 'scanning' || c.status === 'cancelled')),
+  )
   const canResume = Boolean(
-    scan && !running && (status === 'stopped' || ((status === 'error' || status === 'scanning') && scan.chunks.some((c) => c.status === 'pending' || c.status === 'scanning' || c.status === 'cancelled'))),
+    scan && !running && (status === 'stopped' || ((status === 'error' || status === 'scanning') && hasResumableWork)),
   )
   const canStop = running
 
@@ -79,7 +94,12 @@ export function Dashboard() {
           {(status === 'scanning' || status === 'verifying') && (
             <span className="flex items-center gap-1.5 rounded-full bg-primary/15 px-3 py-1 text-xs text-primary">
               <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              {status === 'verifying' ? 'Verifying at 24 fps...' : 'Scanning...'}
+              {(() => {
+                const segCount = scan?.shortSegments?.length ?? 0
+                const minute =
+                  segCount > 1 ? ` minute ${(scan?.currentShortSegment ?? 0) + 1}/${segCount}` : ''
+                return status === 'verifying' ? `Verifying${minute} at 24 fps...` : `Scanning${minute}...`
+              })()}
             </span>
           )}
           <button
@@ -140,6 +160,7 @@ export function Dashboard() {
           {scan && <CandidatesPanel scan={scan} />}
           {scan && scan.report && <ReportPanel scan={scan} />}
           {scan && (scan.matches?.length ?? 0) > 0 && <ComparePanel scan={scan} />}
+          {scan && scan.status === 'done' && (scan.matches?.length ?? 0) > 0 && <RenderPanel scan={scan} />}
           {scan && <ChunkResultsPanel scan={scan} />}
           {scan && <LogsPanel scan={scan} />}
         </div>
