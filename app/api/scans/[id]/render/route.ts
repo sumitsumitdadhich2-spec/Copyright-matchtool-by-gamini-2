@@ -28,7 +28,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const v = validateRenderSettings(body)
   if (!v.ok) return NextResponse.json({ error: v.error }, { status: 400 })
 
-  const err = startRender(id, v.settings)
+  const err = await startRender(id, v.settings)
   if (err) return NextResponse.json({ error: err }, { status: 409 })
 
   return NextResponse.json({ ok: true })

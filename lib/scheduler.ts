@@ -777,7 +777,7 @@ class Scheduler {
           g.confirmedIndex = i
           g.confirmedViaRescan = false
           this.applyGroupResult(job, g)
-          addLog(scan, 'success', `CONFIRMED: short ${ts(g.shortStart)}–${ts(g.shortEnd)} = movie ${ts(c.movieStart)}–${ts(c.movieEnd)} (verifier: ${m.id})`)
+          addLog(scan, 'success', `CONFIRMED: short ${ts(g.shortStart)}–${ts(g.shortEnd)} = movie ${ts(c.movieStart)}–${ts(c.movieEnd)} (verifier: ${vm.id})`)
           return
         }
         addLog(scan, 'warn', `Verifier says DIFFERENT for movie ${ts(c.movieStart)}–${ts(c.movieEnd)}${g.candidates.length > i + 1 ? ' — checking next candidate' : ''}`)

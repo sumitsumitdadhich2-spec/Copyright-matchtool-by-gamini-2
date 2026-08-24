@@ -45,6 +45,22 @@ export async function probeDuration(file: string): Promise<number> {
   return dur
 }
 
+/** True when the file has at least one audio stream (silent movies need a synthesized track for concat). */
+export async function probeHasAudio(file: string): Promise<boolean> {
+  try {
+    const out = await run(FFPROBE, [
+      '-v', 'error',
+      '-select_streams', 'a',
+      '-show_entries', 'stream=codec_type',
+      '-of', 'csv=p=0',
+      file,
+    ])
+    return out.trim().length > 0
+  } catch {
+    return false
+  }
+}
+
 function parseFfmpegTime(line: string): number | null {
   const m = line.match(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/)
   if (!m) return null
