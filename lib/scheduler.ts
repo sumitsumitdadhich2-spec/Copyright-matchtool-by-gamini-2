@@ -1,7 +1,7 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import type { GoogleGenAI } from '@google/genai'
-import type { Scan, ChunkState, ChunkMatch, CandidateGroup } from './types'
+import type { Scan, ChunkState, ChunkMatch, CandidateGroup, ShortSegmentState } from './types'
 import {
   MODEL_POOL,
   CHUNK_MODEL_POOL,
@@ -27,7 +27,7 @@ import {
   setModelExhausted,
   scanMediaDir,
 } from './store'
-import { chunkPath, cleanupChunks, cleanupClips, extractClipPrecise } from './ffmpeg'
+import { chunkPath, cleanupChunks, cleanupClips, extractClipPrecise, extractSegment, segmentPath } from './ffmpeg'
 import {
   getClient,
   uploadVideo,
@@ -49,20 +49,23 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const MAX_CHUNK_ATTEMPTS = 3
 
 /** One API key lane (1-20). Gemini Files API uploads are PER KEY,
- *  so each lane keeps its own uploaded short-video URI. */
+ *  so each lane keeps its own uploaded short-SEGMENT URIs (one per minute). */
 interface KeyLane {
   idx: number
   apiKey: string
   ai: GoogleGenAI
-  shortUri: string | null
-  /** in-flight upload lock so two workers never double-upload the short video */
-  shortUriPromise: Promise<string> | null
+  /** uploaded short-segment URIs keyed by segment index */
+  segUris: Map<number, string>
+  /** per-segment in-flight upload locks so two workers never double-upload */
+  segUriPromises: Map<number, Promise<string>>
 }
 
 interface Job {
   scan: Scan
   lanes: KeyLane[]
-  /** chunk queue (indexes) */
+  /** the short segment (minute) currently being scanned — workers read this */
+  seg: ShortSegmentState | null
+  /** chunk queue (indexes) for the CURRENT segment */
   queue: number[]
   inFlight: Set<number>
   /** verification phase: candidate-group queue (indexes into scan.candidateGroups) */
@@ -102,6 +105,31 @@ class Scheduler {
     return this.jobs.has(scanId)
   }
 
+  /** Synthesize/repair scan.shortSegments. Migration shim: old scans (short was
+   *  trimmed to 1 minute) become a single segment that ADOPTS the existing
+   *  scan.chunks array by reference, so all prior chunk states are preserved. */
+  private ensureSegments(scan: Scan) {
+    const dur = scan.shortDuration || CHUNK_SECONDS
+    const segCount = Math.max(1, Math.ceil(dur / CHUNK_SECONDS))
+    if (!scan.shortSegments || scan.shortSegments.length === 0) {
+      scan.shortSegments = Array.from({ length: segCount }, (_, i) => ({
+        index: i,
+        start: i * CHUNK_SECONDS,
+        end: Math.min((i + 1) * CHUNK_SECONDS, dur),
+        status: 'pending' as const,
+        chunks: i === 0 && Array.isArray(scan.chunks) && scan.chunks.length > 0 ? scan.chunks : [],
+      }))
+    }
+    for (const seg of scan.shortSegments) {
+      if (!Array.isArray(seg.chunks)) seg.chunks = []
+      while (seg.chunks.length < scan.chunkCount) {
+        seg.chunks.push({ index: seg.chunks.length, status: 'pending', attempts: 0 })
+      }
+      if (seg.chunks.length > scan.chunkCount) seg.chunks = seg.chunks.slice(0, scan.chunkCount)
+    }
+    if (scan.currentShortSegment === undefined) scan.currentShortSegment = 0
+  }
+
   async start(scanId: string, resume: boolean): Promise<{ ok: boolean; error?: string }> {
     if (this.jobs.has(scanId)) return { ok: false, error: 'Scan already running' }
     const apiKeys = getAllApiKeys()
@@ -112,20 +140,34 @@ class Scheduler {
       return { ok: false, error: 'Both videos must be uploaded and chunked before scanning.' }
     }
 
-    // Build queue: pending chunks + orphaned "scanning" chunks from an interrupted run.
-    for (const c of scan.chunks) {
-      if (c.status === 'scanning') c.status = 'pending'
-      if (resume && c.status === 'cancelled') c.status = 'pending'
+    // Segments: synthesize/repair the per-minute structure (migration shim for old scans).
+    this.ensureSegments(scan)
+    const segments = scan.shortSegments!
+
+    // Reset orphaned "scanning" chunks + resume cancelled ones ACROSS ALL segments.
+    for (const seg of segments) {
+      for (const c of seg.chunks) {
+        if (c.status === 'scanning') c.status = 'pending'
+        if (resume && c.status === 'cancelled') c.status = 'pending'
+      }
+      if (seg.status === 'scanning' || seg.status === 'verifying') seg.status = 'pending'
+      if (seg.status === 'done' && seg.chunks.some((c) => c.status === 'pending')) seg.status = 'pending'
     }
-    const queue = scan.chunks.filter((c) => c.status === 'pending').map((c) => c.index)
+    const pendingChunks = segments.reduce((n, s) => n + s.chunks.filter((c) => c.status === 'pending').length, 0)
+    const allSettled = segments.every((s) => s.chunks.every((c) => c.status !== 'pending' && c.status !== 'scanning'))
 
     // Verification-only resume: all chunks already mapped but candidate groups
     // still have pending verifier/rescan work (or matches were never verified).
     const hasVerifyWork =
       (scan.candidateGroups || []).some((g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning') ||
-      (!scan.candidateGroups?.length && (scan.matches || []).length > 0 && scan.chunks.every((c) => c.status !== 'pending' && c.status !== 'scanning'))
+      (!scan.candidateGroups?.length && (scan.matches || []).length > 0 && allSettled)
 
-    if (queue.length === 0 && !hasVerifyWork) return { ok: false, error: 'No pending chunks to scan.' }
+    if (pendingChunks === 0 && !hasVerifyWork) return { ok: false, error: 'No pending chunks to scan.' }
+
+    // Mirror the first incomplete segment's chunks so the UI shows the right minute.
+    const firstIncomplete = segments.find((s) => s.status !== 'done') || segments[0]
+    scan.currentShortSegment = firstIncomplete.index
+    scan.chunks = firstIncomplete.chunks
 
     if (!Array.isArray(scan.matches)) scan.matches = []
     scan.status = 'scanning'
@@ -138,22 +180,24 @@ class Scheduler {
       idx: i + 1,
       apiKey: k,
       ai: getClient(k),
-      shortUri: null,
-      shortUriPromise: null,
+      segUris: new Map(),
+      segUriPromises: new Map(),
     }))
 
+    const minuteNote = segments.length > 1 ? ` across ${segments.length} short minutes (scanned sequentially)` : ''
     addLog(
       scan,
       'info',
       resume
-        ? `Resuming: ${queue.length} chunk(s) pending`
-        : `Scan started: ${queue.length} chunks queued across ${CHUNK_MODEL_POOL.length} chunk models (${CHUNK_MODEL_POOL.map((m) => m.id).join(', ')}) × ${lanes.length} API key(s) — one prompt per chunk`,
+        ? `Resuming: ${pendingChunks} chunk(s) pending${minuteNote}`
+        : `Scan started: ${pendingChunks} chunk(s) queued${minuteNote} across ${CHUNK_MODEL_POOL.length} chunk models (${CHUNK_MODEL_POOL.map((m) => m.id).join(', ')}) × ${lanes.length} API key(s) — one prompt per chunk`,
     )
 
     const job: Job = {
       scan,
       lanes,
-      queue,
+      seg: null,
+      queue: [],
       inFlight: new Set(),
       verifyQueue: [],
       verifyInFlight: new Set(),
@@ -199,29 +243,61 @@ class Scheduler {
    *  Works while a scan is running (re-queues on the live job) AND after it has
    *  finished (restarts the scheduler in resume mode; the chunk file is re-cut
    *  from the movie automatically if it was cleaned up). */
-  async retryChunk(scanId: string, chunkIndex: number): Promise<{ ok: boolean; error?: string }> {
+  async retryChunk(scanId: string, chunkIndex: number, segmentIndex?: number): Promise<{ ok: boolean; error?: string }> {
     const job = this.jobs.get(scanId)
     const scan = job ? job.scan : getScan(scanId)
     if (!scan) return { ok: false, error: 'Scan not found' }
-    const chunk = scan.chunks?.[chunkIndex]
+
+    // Resolve the target segment (default: the current/selected minute).
+    let seg: ShortSegmentState | null = null
+    let chunk: ChunkState | undefined
+    if (scan.shortSegments?.length) {
+      const si = segmentIndex ?? scan.currentShortSegment ?? 0
+      seg = scan.shortSegments[si] ?? null
+      if (!seg) return { ok: false, error: `Short minute ${si} not found` }
+      chunk = seg.chunks[chunkIndex]
+    } else {
+      chunk = scan.chunks?.[chunkIndex]
+    }
     if (!chunk) return { ok: false, error: `Chunk ${chunkIndex} not found` }
-    if (chunk.status === 'scanning' || job?.inFlight.has(chunkIndex)) {
+
+    const isActiveSeg = !seg || !job || job.seg === seg
+    if ((chunk.status === 'scanning' || job?.inFlight.has(chunkIndex)) && isActiveSeg) {
       return { ok: false, error: `Chunk ${chunkIndex} is currently in flight — wait for it to finish` }
     }
-    if (job?.queue.includes(chunkIndex)) {
+    if (job && isActiveSeg && job.queue.includes(chunkIndex)) {
       return { ok: false, error: `Chunk ${chunkIndex} is already queued` }
     }
+    if (job && !isActiveSeg) {
+      return {
+        ok: false,
+        error: `Scan is busy on minute ${(job.seg?.index ?? 0) + 1} — retry this chunk of minute ${(seg?.index ?? 0) + 1} after the scan finishes`,
+      }
+    }
 
-    // Reset the chunk and wipe its old evidence.
+    // Reset the chunk and wipe its old evidence — ONLY within this segment's short window.
+    const segStart = seg ? seg.start : 0
+    const segEnd = seg ? seg.end : Number.POSITIVE_INFINITY
     chunk.status = 'pending'
     chunk.attempts = 0
     chunk.qualityRetries = 0
     chunk.matches = []
-    scan.matches = (scan.matches || []).filter((mm) => mm.chunkIndex !== chunkIndex)
+    scan.matches = (scan.matches || []).filter(
+      (mm) => !(mm.chunkIndex === chunkIndex && mm.shortStart >= segStart && mm.shortStart < segEnd),
+    )
     if (scan.candidateGroups?.length) {
-      scan.candidateGroups = scan.candidateGroups.filter((g) => !g.candidates.some((c) => c.chunkIndex === chunkIndex))
+      scan.candidateGroups = scan.candidateGroups.filter(
+        (g) => !(g.shortStart >= segStart && g.shortStart < segEnd && g.candidates.some((c) => c.chunkIndex === chunkIndex)),
+      )
     }
-    addLog(scan, 'info', `Manual retry: chunk ${chunkIndex} reset and re-queued for chunk-model mapping`)
+    if (seg && seg.status === 'done') seg.status = 'pending'
+    addLog(
+      scan,
+      'info',
+      seg && (scan.shortSegments?.length ?? 0) > 1
+        ? `Manual retry: minute ${seg.index + 1} · chunk ${chunkIndex} reset and re-queued for chunk-model mapping`
+        : `Manual retry: chunk ${chunkIndex} reset and re-queued for chunk-model mapping`,
+    )
 
     if (job) {
       job.queue.push(chunkIndex)
@@ -273,36 +349,95 @@ class Scheduler {
     return s
   }
 
-  /** Upload the short video once per key lane (Files API uploads are per key). */
-  private async ensureShortUri(job: Job, lane: KeyLane): Promise<string> {
-    if (lane.shortUri) return lane.shortUri
-    if (!lane.shortUriPromise) {
-      lane.shortUriPromise = (async () => {
-        addLog(job.scan, 'info', `Uploading short video to Gemini Files API (key ${lane.idx})...`)
+  /** Upload ONE short-minute segment file per key lane (Files API uploads are per key).
+   *  The segment file is re-cut from the ORIGINAL short.mp4 if it went missing. */
+  private async ensureSegmentUri(job: Job, lane: KeyLane, seg: ShortSegmentState): Promise<string> {
+    const existing = lane.segUris.get(seg.index)
+    if (existing) return existing
+    let p = lane.segUriPromises.get(seg.index)
+    if (!p) {
+      p = (async () => {
+        const mediaDir = scanMediaDir(job.scan.id)
+        const segDir = path.join(mediaDir, 'segments')
+        const file = segmentPath(segDir, seg.index)
+        if (!fs.existsSync(file)) {
+          fs.mkdirSync(segDir, { recursive: true })
+          addLog(job.scan, 'info', `Minute ${seg.index + 1}: segment file missing — re-cutting ${ts(seg.start)}–${ts(seg.end)} from the original short`)
+          await extractSegment(path.join(mediaDir, 'short.mp4'), seg.start, seg.end, file)
+        }
+        addLog(job.scan, 'info', `Uploading short minute ${seg.index + 1} to Gemini Files API (key ${lane.idx})...`)
         this.mark(job)
-        const f = await uploadVideo(lane.ai, path.join(scanMediaDir(job.scan.id), 'short.mp4'))
-        lane.shortUri = f.uri
-        addLog(job.scan, 'success', `Short video ready on Gemini (key ${lane.idx})`)
+        const f = await uploadVideo(lane.ai, file)
+        lane.segUris.set(seg.index, f.uri)
+        addLog(job.scan, 'success', `Short minute ${seg.index + 1} ready on Gemini (key ${lane.idx})`)
         this.mark(job)
         return f.uri
       })().catch((err) => {
-        lane.shortUriPromise = null
+        lane.segUriPromises.delete(seg.index)
         throw err
       })
+      lane.segUriPromises.set(seg.index, p)
     }
-    return lane.shortUriPromise
+    return p
   }
 
   private async runScan(job: Job) {
     const { scan } = job
+    const segments = scan.shortSegments || []
+    const multi = segments.length > 1
 
-    // CHUNK PHASE: one worker per (key lane × CHUNK model). ONLY gemini-3.6-flash
-    // and gemini-3.7-flash map chunks — all keys run both in parallel.
-    const workers: Promise<void>[] = []
-    for (const lane of job.lanes) {
-      for (const m of CHUNK_MODEL_POOL) workers.push(this.worker(job, lane, m))
+    // SEQUENTIAL PER-MINUTE PASSES: minute N+1 only starts after minute N has
+    // been mapped against EVERY movie chunk AND its candidate groups verified —
+    // API tokens are only ever spent on one short minute at a time.
+    for (const seg of segments) {
+      if (job.stopping) break
+      const pending = seg.chunks.filter((c) => c.status === 'pending')
+      if (pending.length === 0 && seg.status === 'done') continue
+
+      scan.currentShortSegment = seg.index
+      job.seg = seg
+      // Mirror: scan.chunks IS this segment's chunks array (same reference),
+      // so the existing worker code + UI keep working unchanged.
+      scan.chunks = seg.chunks
+      scan.status = 'scanning'
+      this.mark(job)
+
+      if (pending.length > 0) {
+        seg.status = 'scanning'
+        job.queue = pending.map((c) => c.index)
+        if (multi) {
+          addLog(scan, 'info', `Minute ${seg.index + 1}/${segments.length}: scanning short ${ts(seg.start)}–${ts(seg.end)} against ${pending.length} pending movie chunk(s)`)
+        }
+        this.mark(job)
+
+        // CHUNK PHASE for THIS minute: one worker per (key lane × CHUNK model).
+        const workers: Promise<void>[] = []
+        for (const lane of job.lanes) {
+          for (const m of CHUNK_MODEL_POOL) workers.push(this.worker(job, lane, m))
+        }
+        await Promise.all(workers)
+      }
+      if (job.stopping) break
+
+      // Quota exhausted mid-minute: chunks still pending — do NOT verify or advance.
+      if (seg.chunks.some((c) => c.status === 'pending' || c.status === 'scanning')) break
+
+      // VERIFICATION for THIS minute: buildCandidateGroups is incremental, so only
+      // groups born from this segment's fresh (unverified) matches get queued.
+      seg.status = 'verifying'
+      this.mark(job)
+      await this.runVerification(job)
+      if (job.stopping) break
+
+      const leftoverNow = (scan.candidateGroups || []).filter(
+        (g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning',
+      )
+      if (leftoverNow.length > 0) break // quota exhausted mid-verification — resumable below
+
+      seg.status = 'done'
+      if (multi) addLog(scan, 'success', `Minute ${seg.index + 1}/${segments.length} complete — mapped + verified against the whole movie`)
+      this.mark(job)
     }
-    await Promise.all(workers)
 
     // All work over. Persist final model states.
     for (const lane of job.lanes) {
@@ -320,34 +455,34 @@ class Scheduler {
       return
     }
 
-    // ---------- PHASE 2: candidate verification (24 fps verifier + rescan) ----------
-    await this.runVerification(job)
-
-    if (job.stopping) {
-      scan.status = 'stopped'
-      addLog(scan, 'warn', 'Scan stopped during verification. Progress saved — use Resume to continue.')
-      this.finish(job)
-      return
-    }
-
     const groups = scan.candidateGroups || []
-
-    // Quota ran out mid-verification: keep the scan resumable instead of finishing.
     const leftover = groups.filter((g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning')
-    if (leftover.length > 0) {
+    const chunksLeft = segments.some((s) => s.chunks.some((c) => c.status === 'pending' || c.status === 'scanning'))
+
+    // Quota ran out mid-scan/mid-verification: keep the scan resumable instead of finishing.
+    if (leftover.length > 0 || chunksLeft) {
       scan.status = 'stopped'
-      addLog(scan, 'warn', `Verification paused: ${leftover.length} group(s) still pending (daily quota exhausted?). Use Resume to continue.`)
+      addLog(
+        scan,
+        'warn',
+        leftover.length > 0
+          ? `Verification paused: ${leftover.length} group(s) still pending (daily quota exhausted?). Use Resume to continue.`
+          : 'Scan paused: chunks still pending (daily quota exhausted?). Use Resume to continue.',
+      )
       this.finish(job)
       return
     }
 
+    for (const seg of segments) if (seg.status !== 'done') seg.status = 'done'
+
+    const allChunks = segments.flatMap((s) => s.chunks)
     scan.status = 'done'
     scan.finishedAt = Date.now()
     scan.matches.sort((a, b) => a.shortStart - b.shortStart || a.movieStart - b.movieStart)
     scan.report = {
       totalScanTimeMs: scan.finishedAt - (scan.startedAt || scan.finishedAt),
-      chunksScanned: scan.chunks.filter((c) => c.status === 'match' || c.status === 'no_match').length,
-      chunksFailed: scan.chunks.filter((c) => c.status === 'failed').length,
+      chunksScanned: allChunks.filter((c) => c.status === 'match' || c.status === 'no_match').length,
+      chunksFailed: allChunks.filter((c) => c.status === 'failed').length,
       modelsUsed: MODEL_POOL.filter((m) => job.lanes.some((l) => getModelUsage(m.id, l.apiKey) > 0)).map((m) => m.id),
       matches: scan.matches,
       groupsTotal: groups.length,
@@ -355,7 +490,7 @@ class Scheduler {
       groupsRejected: groups.filter((g) => g.status === 'rejected').length,
       groupsUnverified: groups.filter((g) => g.status === 'unverified').length,
     }
-    addLog(scan, 'success', `Scan complete: ${scan.matches.length} matched segment(s) across ${scan.chunks.filter((c) => c.status === 'match').length} chunk(s)`)
+    addLog(scan, 'success', `Scan complete: ${scan.matches.length} matched segment(s)${multi ? ` across ${segments.length} short minute(s)` : ''}`)
     cleanupChunks(path.join(scanMediaDir(scan.id), 'chunks'))
     cleanupClips(path.join(scanMediaDir(scan.id), 'clips'))
     addLog(scan, 'info', 'Temporary chunk files cleaned up')
@@ -791,9 +926,15 @@ class Scheduler {
     this.jobs.delete(job.scan.id)
   }
 
-  /** Merge a chunk's parsed matches into the scan-level list (replace this chunk's old entries). */
-  private mergeMatches(scan: Scan, chunkIndex: number, matches: ChunkMatch[]) {
-    scan.matches = (scan.matches || []).filter((m) => m.chunkIndex !== chunkIndex)
+  /** Merge a chunk's parsed matches into the scan-level list. Replaces ONLY this
+   *  chunk's old entries WITHIN the given short-minute window — the same movie
+   *  chunk can legitimately hold matches from other short minutes. */
+  private mergeMatches(scan: Scan, chunkIndex: number, matches: ChunkMatch[], seg: ShortSegmentState | null) {
+    const segStart = seg ? seg.start : 0
+    const segEnd = seg ? seg.end : Number.POSITIVE_INFINITY
+    scan.matches = (scan.matches || []).filter(
+      (m) => !(m.chunkIndex === chunkIndex && m.shortStart >= segStart && m.shortStart < segEnd),
+    )
     scan.matches.push(...matches)
     scan.matches.sort((a, b) => a.shortStart - b.shortStart || a.movieStart - b.movieStart)
   }
