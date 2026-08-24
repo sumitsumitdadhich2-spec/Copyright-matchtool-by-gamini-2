@@ -166,7 +166,26 @@ export function newScan(): Scan {
 }
 
 export function getScan(id: string): Scan | null {
-  return readJSON<Scan | null>(scanFile(id), null)
+  const scan = readJSON<Scan | null>(scanFile(id), null)
+  if (!scan) return null
+
+  // Backward compatibility: scans created before minute-wise scanning used
+  // scan.chunks as their only chunk-state source. Expose that data as one
+  // segment so old completed scans render consistently in every UI panel.
+  if (!scan.shortSegments?.length && scan.shortDuration) {
+    scan.shortSegments = [
+      {
+        index: 0,
+        start: 0,
+        end: scan.shortDuration,
+        status: scan.status === 'done' ? 'done' : 'pending',
+        chunks: scan.chunks,
+      },
+    ]
+    scan.currentShortSegment = 0
+  }
+
+  return scan
 }
 
 export function saveScan(scan: Scan) {

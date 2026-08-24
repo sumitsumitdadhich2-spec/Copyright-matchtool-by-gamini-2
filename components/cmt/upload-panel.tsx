@@ -49,8 +49,8 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
     try {
       const res = await fetch(`/api/scans/${id}`, { cache: 'no-store' })
       if (!res.ok) return false
-      const s: Scan = await res.json()
-      return kind === 'short' ? s.shortName === fileName : s.movieName === fileName
+      const { scan: uploadedScan } = (await res.json()) as { scan: Scan }
+      return kind === 'short' ? uploadedScan.shortName === fileName : uploadedScan.movieName === fileName
     } catch {
       return false
     }
