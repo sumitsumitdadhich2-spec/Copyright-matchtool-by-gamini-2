@@ -39,6 +39,56 @@ export interface ChunkState {
   rawOutputs?: ChunkRawOutput[]
 }
 
+export type ShortSegmentStatus = 'pending' | 'scanning' | 'verifying' | 'done'
+
+/** One 1-minute segment of the SHORT video. Long shorts are scanned
+ *  minute-by-minute: segment N+1 only starts after segment N has been
+ *  mapped against EVERY movie chunk AND its matches verified. */
+export interface ShortSegmentState {
+  /** minute number within the short video (0-based) */
+  index: number
+  /** ABSOLUTE seconds within the short video */
+  start: number
+  end: number
+  status: ShortSegmentStatus
+  /** per-movie-chunk states for THIS short segment (source of truth) */
+  chunks: ChunkState[]
+}
+
+// ---------- Render / Export ----------
+
+export type RenderResolution = '480p' | '720p' | '1080p' | '2k' | '4k'
+
+export interface RenderSettings {
+  resolution: RenderResolution
+  /** output frames per second, 1-120 */
+  fps: number
+  /** video bitrate in kbps */
+  videoBitrateKbps: number
+  /** audio bitrate in kbps */
+  audioBitrateKbps: number
+}
+
+export type RenderStatus = 'idle' | 'rendering' | 'done' | 'error'
+
+export interface RenderJob {
+  status: RenderStatus
+  settings: RenderSettings | null
+  /** 0-100 */
+  pct: number
+  /** estimated seconds remaining (from ffmpeg speed=) */
+  etaSeconds: number | null
+  /** total duration of the stitched output in seconds */
+  totalOutputSeconds: number
+  /** number of scene segments being stitched */
+  segmentCount: number
+  error: string | null
+  startedAt: number | null
+  finishedAt: number | null
+  /** final rendered file size in bytes */
+  fileSize: number | null
+}
+
 export interface LogEntry {
   t: number
   level: 'info' | 'warn' | 'error' | 'success'
@@ -139,7 +189,17 @@ export interface Scan {
   movieDuration: number | null
   chunkCount: number
   chunkingProgress: number
+  /** MIRROR of the current/active short segment's chunks (kept for UI compat).
+   *  Source of truth per segment lives in shortSegments[i].chunks. */
   chunks: ChunkState[]
+  /** 1-minute segments of the short video, scanned sequentially (minute-by-minute) */
+  shortSegments?: ShortSegmentState[]
+  /** index of the short segment currently being scanned/verified */
+  currentShortSegment?: number
+  /** background cutting of the short into 1-minute segment files (0-100) */
+  shortSegmentingProgress?: number
+  /** render/export job state (present after a render is started) */
+  renderJob?: RenderJob
   /** all parsed matches across all chunks, sorted by shortStart (absolute movie seconds) */
   matches: ChunkMatch[]
   /** Candidate + verifier pipeline: one group per claimed short segment */
