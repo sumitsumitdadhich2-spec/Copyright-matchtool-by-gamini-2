@@ -48,7 +48,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** Max attempts per chunk before it is marked failed. */
 const MAX_CHUNK_ATTEMPTS = 3
 
-/** One API key lane (1-5). Gemini Files API uploads are PER KEY,
+/** One API key lane (1-20). Gemini Files API uploads are PER KEY,
  *  so each lane keeps its own uploaded short-video URI. */
 interface KeyLane {
   idx: number
@@ -132,7 +132,7 @@ class Scheduler {
     scan.error = null
     if (!scan.startedAt) scan.startedAt = Date.now()
 
-    // One lane per configured key (1-5, already de-duplicated). All lanes pull
+    // One lane per configured key (1-20, already de-duplicated). All lanes pull
     // chunks from the same shared queue in parallel.
     const lanes: KeyLane[] = apiKeys.map((k, i) => ({
       idx: i + 1,
@@ -253,7 +253,7 @@ class Scheduler {
   }
 
   /** modelStates key: lane 1 uses the plain model id (drives the Model Pool board);
-   *  lanes 2-5 keep their own suffixed entries so keys never overwrite each other. */
+   *  lanes 2-20 keep their own suffixed entries so keys never overwrite each other. */
   private stateKey(lane: KeyLane, m: ModelSpec) {
     return lane.idx === 1 ? m.id : `${m.id}@${lane.idx}`
   }

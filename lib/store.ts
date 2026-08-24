@@ -36,22 +36,20 @@ function writeJSON(file: string, data: unknown) {
 
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json')
 
-/** Up to 5 Gemini API keys. Key 1 is required; 2-5 are optional parallel workers. */
-export const MAX_API_KEYS = 5
+/** Up to 20 Gemini API keys. Key 1 is required; 2-20 are optional parallel workers. */
+export const MAX_API_KEYS = 20
 
 interface Settings {
+  /** Slot 1 keeps the legacy `apiKey` field name; slots 2-20 use `apiKey2`...`apiKey20`. */
   apiKey?: string
-  apiKey2?: string
-  apiKey3?: string
-  apiKey4?: string
-  apiKey5?: string
+  [key: `apiKey${number}`]: string | undefined
 }
 
 function keyField(n: number): keyof Settings {
   return (n === 1 ? 'apiKey' : `apiKey${n}`) as keyof Settings
 }
 
-/** Read API key for slot n (1-5). Slot 1 keeps the legacy `apiKey` field name. */
+/** Read API key for slot n (1-20). Slot 1 keeps the legacy `apiKey` field name. */
 export function getApiKeyN(n: number): string | null {
   const s = readJSON<Settings>(SETTINGS_FILE, {})
   return (s[keyField(n)] as string | undefined) || null
