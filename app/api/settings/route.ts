@@ -41,7 +41,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true })
   }
 
-  // ----- Save keys: accepts apiKey/apiKey1 ... apiKey5, any combination -----
+  // ----- Save keys: accepts apiKey/apiKey1 ... apiKey20, any combination -----
   const updates: { n: number; key: string }[] = []
   for (let n = 1; n <= MAX_API_KEYS; n++) {
     const raw = n === 1 ? (body.apiKey1 ?? body.apiKey) : body[`apiKey${n}`]

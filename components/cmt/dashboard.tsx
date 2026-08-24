@@ -2,10 +2,10 @@
 
 import { useState } from 'react'
 import useSWR from 'swr'
-import { Play, Square, RotateCcw, Loader2, ScanSearch } from 'lucide-react'
+import { Play, Square, RotateCcw, Loader2, ScanSearch, Settings } from 'lucide-react'
 import type { Scan } from '@/lib/types'
 import { fetcher } from '@/lib/format'
-import { ApiKeyPanel } from './api-key-panel'
+import { SettingsDialog } from './settings-dialog'
 import { UploadPanel } from './upload-panel'
 import { ScanTimeline } from './scan-timeline'
 import { ModelBoard } from './model-board'
@@ -26,6 +26,7 @@ export function Dashboard() {
   const [scanId, setScanId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const { data, mutate } = useSWR<ScanResponse>(scanId ? `/api/scans/${scanId}` : null, fetcher, {
     refreshInterval: (latest) => {
@@ -105,8 +106,20 @@ export function Dashboard() {
           >
             <Square className="size-4" aria-hidden /> Stop
           </button>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            aria-label="Open settings"
+            title="Settings — API keys"
+            className="flex items-center gap-1.5 rounded-md border border-input px-3 py-2 text-sm font-medium hover:bg-secondary"
+          >
+            <Settings className="size-4" aria-hidden />
+            <span className="hidden sm:inline">Settings</span>
+          </button>
         </div>
       </header>
+
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       {actionError && (
         <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -131,7 +144,6 @@ export function Dashboard() {
           {scan && <LogsPanel scan={scan} />}
         </div>
         <div className="flex flex-col gap-4">
-          <ApiKeyPanel />
           <HistoryPanel
             activeId={scanId}
             onSelect={(id) => setScanId(id)}

@@ -16,12 +16,10 @@ interface SettingsResponse {
   maxKeys: number
 }
 
-const SLOT_LABELS: Record<number, string> = {
-  1: 'API Key 1 — Main Scanner',
-  2: 'API Key 2 — Worker (optional)',
-  3: 'API Key 3 — Worker (optional)',
-  4: 'API Key 4 — Worker (optional)',
-  5: 'API Key 5 — Worker (optional)',
+const MAX_SLOTS = 20
+
+function slotLabel(n: number): string {
+  return n === 1 ? 'API Key 1 — Main Scanner' : `API Key ${n} — Worker (optional)`
 }
 
 export function ApiKeyPanel() {
@@ -33,7 +31,7 @@ export function ApiKeyPanel() {
   const [error, setError] = useState<string | null>(null)
 
   const slots: KeySlot[] =
-    data?.keys ?? Array.from({ length: 5 }, (_, i) => ({ index: i + 1, hasKey: false, maskedKey: null }))
+    data?.keys ?? Array.from({ length: MAX_SLOTS }, (_, i) => ({ index: i + 1, hasKey: false, maskedKey: null }))
 
   async function save(n: number) {
     const v = (values[n] || '').trim()
@@ -83,7 +81,7 @@ export function ApiKeyPanel() {
           <div key={n} className={n === 1 ? '' : 'mt-4 border-t border-border pt-4'}>
             <div className="flex items-center gap-2">
               <Icon className="size-4 text-primary" aria-hidden />
-              <h2 className="text-sm font-semibold">{SLOT_LABELS[n] || `API Key ${n}`}</h2>
+              <h2 className="text-sm font-semibold">{slotLabel(n)}</h2>
               {slot.hasKey ? (
                 <span className="ml-auto flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 font-mono text-xs text-success">
                   <Check className="size-3" aria-hidden />
@@ -121,7 +119,7 @@ export function ApiKeyPanel() {
               >
                 {saving === n ? 'Saving...' : saved === n ? 'Saved' : slot.hasKey ? 'Update' : 'Save'}
               </button>
-              {n !== 1 && slot.hasKey && (
+              {slot.hasKey && (
                 <button
                   type="button"
                   onClick={() => remove(n)}
@@ -139,7 +137,7 @@ export function ApiKeyPanel() {
       })}
 
       <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-        Add 1 to 5 keys — the scan works with ANY number. All keys scan chunks in parallel first, then all keys run 24fps
+        Add 1 to 20 keys — the scan works with ANY number. All keys scan chunks in parallel first, then all keys run 24fps
         verification together, and whichever key is free picks up any pending work. Each key uses all 6 models with its own
         daily counters. More keys = faster scans. Keys are stored server-side only.
       </p>
