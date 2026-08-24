@@ -74,34 +74,40 @@ const SCAN_FPS_STR = '24'
  * Cut the movie into exact sequential 1-minute chunks.
  * Re-encodes at 24 fps / 640px width / CRF 28 with keyframes forced at every 60s so
  * chunk boundaries are frame-accurate and files stay small for upload.
+ * Optional trimStart/trimEnd (ABSOLUTE original-movie seconds) chunk ONLY that range —
+ * the original movie file is never modified, only the scan copies are cut.
  */
 export async function chunkMovie(
   movieFile: string,
   outDir: string,
   duration: number,
   onProgress: (pct: number) => void,
+  trimStart = 0,
+  trimEnd?: number,
 ): Promise<number> {
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true })
   const pattern = path.join(outDir, 'chunk-%04d.mp4')
-  await run(
-    FFMPEG,
-    [
-      '-y',
-      '-i', movieFile,
-      '-vf', `scale=640:-2,fps=${SCAN_FPS_STR}`,
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
-      '-force_key_frames', `expr:gte(t,n_forced*${CHUNK_SECONDS})`,
-      '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
-      '-f', 'segment',
-      '-segment_time', String(CHUNK_SECONDS),
-      '-reset_timestamps', '1',
-      pattern,
-    ],
-    (line) => {
-      const t = parseFfmpegTime(line)
-      if (t !== null) onProgress(Math.min(99, Math.round((t / duration) * 100)))
-    },
+  const rangeEnd = trimEnd !== undefined && trimEnd > trimStart ? Math.min(trimEnd, duration) : duration
+  const rangeDur = Math.max(1, rangeEnd - trimStart)
+  const trimmed = trimStart > 0.01 || rangeEnd < duration - 0.01
+  const args: string[] = ['-y']
+  if (trimStart > 0.01) args.push('-ss', trimStart.toFixed(3))
+  args.push('-i', movieFile)
+  if (trimmed) args.push('-t', rangeDur.toFixed(3))
+  args.push(
+    '-vf', `scale=640:-2,fps=${SCAN_FPS_STR}`,
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+    '-force_key_frames', `expr:gte(t,n_forced*${CHUNK_SECONDS})`,
+    '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
+    '-f', 'segment',
+    '-segment_time', String(CHUNK_SECONDS),
+    '-reset_timestamps', '1',
+    pattern,
   )
+  await run(FFMPEG, args, (line) => {
+    const t = parseFfmpegTime(line)
+    if (t !== null) onProgress(Math.min(99, Math.round((t / rangeDur) * 100)))
+  })
   onProgress(100)
   return fs.readdirSync(outDir).filter((f) => f.startsWith('chunk-') && f.endsWith('.mp4')).length
 }
