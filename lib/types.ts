@@ -53,6 +53,8 @@ export interface ShortSegmentState {
   status: ShortSegmentStatus
   /** per-movie-chunk states for THIS short segment (source of truth) */
   chunks: ChunkState[]
+  /** user minute selection: false = skipped by the scheduler (default true) */
+  selected?: boolean
 }
 
 // ---------- Render / Export ----------
@@ -189,6 +191,12 @@ export interface Scan {
   movieDuration: number | null
   chunkCount: number
   chunkingProgress: number
+  /** movie uploaded but the trim window is not confirmed yet — chunking waits */
+  awaitingTrim?: boolean
+  /** confirmed trim window (ABSOLUTE movie seconds) — chunks cover ONLY this range.
+   *  All reported movie timestamps stay absolute to the ORIGINAL movie. */
+  movieTrimStart?: number
+  movieTrimEnd?: number
   /** MIRROR of the current/active short segment's chunks (kept for UI compat).
    *  Source of truth per segment lives in shortSegments[i].chunks. */
   chunks: ChunkState[]
