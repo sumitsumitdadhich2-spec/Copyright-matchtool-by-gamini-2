@@ -7,6 +7,8 @@ import type { Scan } from '@/lib/types'
 import { fetcher } from '@/lib/format'
 import { SettingsDialog } from './settings-dialog'
 import { UploadPanel } from './upload-panel'
+import { TrimPanel } from './trim-panel'
+import { MinuteSelectPanel } from './minute-select-panel'
 import { ScanTimeline } from './scan-timeline'
 import { ModelBoard } from './model-board'
 import { ChunkResultsPanel } from './chunk-results-panel'
@@ -92,15 +94,30 @@ export function Dashboard() {
 
         <div className="ml-auto flex items-center gap-2">
           {(status === 'scanning' || status === 'verifying') && (
-            <span className="flex items-center gap-1.5 rounded-full bg-primary/15 px-3 py-1 text-xs text-primary">
-              <Loader2 className="size-3.5 animate-spin" aria-hidden />
-              {(() => {
-                const segCount = scan?.shortSegments?.length ?? 0
-                const minute =
-                  segCount > 1 ? ` minute ${(scan?.currentShortSegment ?? 0) + 1}/${segCount}` : ''
-                return status === 'verifying' ? `Verifying${minute} at 24 fps...` : `Scanning${minute}...`
-              })()}
-            </span>
+            <>
+              <span className="flex items-center gap-1.5 rounded-full bg-primary/15 px-3 py-1 text-xs text-primary">
+                <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                {(() => {
+                  const segCount = scan?.shortSegments?.length ?? 0
+                  const minute =
+                    segCount > 1 ? ` minute ${(scan?.currentShortSegment ?? 0) + 1}/${segCount}` : ''
+                  return status === 'verifying' ? `Verifying${minute} at 24 fps...` : `Scanning${minute}...`
+                })()}
+              </span>
+              {/* Verify pipeline runs IN PARALLEL with chunk scanning — show its own status. */}
+              {status === 'scanning' &&
+                (() => {
+                  const active = (scan?.candidateGroups || []).filter(
+                    (g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning',
+                  ).length
+                  return active > 0 ? (
+                    <span className="flex items-center gap-1.5 rounded-full bg-amber-500/15 px-3 py-1 text-xs text-amber-600 dark:text-amber-400">
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                      Verify pipeline: {active} group(s)
+                    </span>
+                  ) : null
+                })()}
+            </>
           )}
           <button
             type="button"
@@ -155,6 +172,12 @@ export function Dashboard() {
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="flex flex-col gap-4 lg:col-span-2">
           <UploadPanel scan={scan} selectedScanId={scanId} onScanCreated={(id) => setScanId(id)} refresh={() => void mutate()} />
+          {scan && scan.awaitingTrim && scan.movieDuration && scan.status !== 'chunking' && (
+            <TrimPanel scan={scan} refresh={() => void mutate()} />
+          )}
+          {scan && (scan.shortSegments?.length ?? 0) > 1 && !scan.awaitingTrim && (
+            <MinuteSelectPanel scan={scan} running={running} refresh={() => void mutate()} />
+          )}
           <ScanTimeline scan={scan || emptyScan()} />
           <ModelBoard scan={scan} usage={data?.usage || null} />
           {scan && <CandidatesPanel scan={scan} />}

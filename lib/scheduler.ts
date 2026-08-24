@@ -414,13 +414,22 @@ class Scheduler {
     const segments = scan.shortSegments || []
     const multi = segments.length > 1
 
-    // SEQUENTIAL PER-MINUTE PASSES: minute N+1 only starts after minute N has
-    // been mapped against EVERY movie chunk AND its candidate groups verified —
-    // API tokens are only ever spent on one short minute at a time.
+    // Reset transient verify states from an interrupted run + queue any groups
+    // still pending from a previous session (verification-only resume).
+    this.prepareVerifyState(scan)
+    this.enqueueNewGroups(job, true)
+
+    // PER-MINUTE PASSES with PIPELINE PARALLELISM: within a minute, the two
+    // dedicated CHUNK models map chunks while the separate VERIFY models verify
+    // finished chunks' candidates AT THE SAME TIME — neither pipeline ever
+    // waits for the other. Minute N+1 still only starts after minute N is
+    // fully mapped AND verified (API tokens stay focused on one short minute).
     for (const seg of segments) {
       if (job.stopping) break
+      // MINUTE SELECTION: unselected minutes are skipped entirely (quota saver).
+      if (seg.selected === false) continue
       const pending = seg.chunks.filter((c) => c.status === 'pending')
-      if (pending.length === 0 && seg.status === 'done') continue
+      if (pending.length === 0 && seg.status === 'done' && job.verifyQueue.length === 0 && job.verifyInFlight.size === 0) continue
 
       scan.currentShortSegment = seg.index
       job.seg = seg
@@ -433,29 +442,62 @@ class Scheduler {
       if (pending.length > 0) {
         seg.status = 'scanning'
         job.queue = pending.map((c) => c.index)
+        job.chunkPhaseDone = false
         if (multi) {
           addLog(scan, 'info', `Minute ${seg.index + 1}/${segments.length}: scanning short ${ts(seg.start)}–${ts(seg.end)} against ${pending.length} pending movie chunk(s)`)
         }
+        addLog(
+          scan,
+          'info',
+          `Pipeline parallelism ON: chunk models (${CHUNK_MODEL_POOL.map((m) => m.id).join(', ')}) map chunks while verify models check finished candidates in parallel`,
+        )
         this.mark(job)
 
-        // CHUNK PHASE for THIS minute: one worker per (key lane × CHUNK model).
-        const workers: Promise<void>[] = []
+        // CHUNK PIPELINE: one worker per (key lane × CHUNK model) — these
+        // workers ONLY do chunk mapping, never verification.
+        const chunkWorkers: Promise<void>[] = []
         for (const lane of job.lanes) {
-          for (const m of CHUNK_MODEL_POOL) workers.push(this.worker(job, lane, m))
+          for (const m of CHUNK_MODEL_POOL) chunkWorkers.push(this.worker(job, lane, m))
         }
-        await Promise.all(workers)
+        // VERIFY PIPELINE (runs CONCURRENTLY): one worker per (key lane ×
+        // VERIFY model) — these ONLY verify candidate groups, never chunk-map.
+        // They idle-wait until chunk workers feed the queue, and exit once the
+        // chunk phase is done AND the verify queue has fully drained.
+        const verifyWorkers: Promise<void>[] = []
+        for (const lane of job.lanes) {
+          for (const m of VERIFY_MODEL_POOL) verifyWorkers.push(this.verifyWorker(job, lane, m))
+        }
+
+        const chunkPhase = Promise.all(chunkWorkers).then(() => {
+          job.chunkPhaseDone = true
+          // Catch any candidates merged by the very last chunk.
+          this.enqueueNewGroups(job)
+          if (!job.stopping && !seg.chunks.some((c) => c.status === 'pending' || c.status === 'scanning')) {
+            seg.status = 'verifying'
+            if (job.verifyQueue.length > 0 || job.verifyInFlight.size > 0) scan.status = 'verifying'
+            this.mark(job)
+          }
+        })
+        await Promise.all([chunkPhase, ...verifyWorkers])
+      } else {
+        // Nothing to map for this minute — verification-only pass.
+        job.chunkPhaseDone = true
+        this.enqueueNewGroups(job)
+        if (job.verifyQueue.length > 0 || job.verifyInFlight.size > 0) {
+          seg.status = 'verifying'
+          scan.status = 'verifying'
+          this.mark(job)
+          const verifyWorkers: Promise<void>[] = []
+          for (const lane of job.lanes) {
+            for (const m of VERIFY_MODEL_POOL) verifyWorkers.push(this.verifyWorker(job, lane, m))
+          }
+          await Promise.all(verifyWorkers)
+        }
       }
       if (job.stopping) break
 
-      // Quota exhausted mid-minute: chunks still pending — do NOT verify or advance.
+      // Quota exhausted mid-minute: chunks still pending — do NOT advance.
       if (seg.chunks.some((c) => c.status === 'pending' || c.status === 'scanning')) break
-
-      // VERIFICATION for THIS minute: buildCandidateGroups is incremental, so only
-      // groups born from this segment's fresh (unverified) matches get queued.
-      seg.status = 'verifying'
-      this.mark(job)
-      await this.runVerification(job)
-      if (job.stopping) break
 
       const leftoverNow = (scan.candidateGroups || []).filter(
         (g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning',
@@ -573,15 +615,9 @@ class Scheduler {
     scan.candidateGroups = groups
   }
 
-  /** Verification phase: every (key lane × model) worker pulls candidate groups
-   *  from a shared queue so ALL API keys verify in parallel — no key sits idle. */
-  private async runVerification(job: Job) {
-    const { scan } = job
-    this.buildCandidateGroups(scan)
-    const groups = scan.candidateGroups || []
-
-    // Reset transient states from an interrupted run.
-    for (const g of groups) {
+  /** Reset transient candidate-group states left over from an interrupted run. */
+  private prepareVerifyState(scan: Scan) {
+    for (const g of scan.candidateGroups || []) {
       if (g.status === 'verifying' || g.status === 'rescanning') g.status = 'pending'
       for (const c of g.candidates) {
         if (c.verdict === 'verifying') c.verdict = 'pending'
@@ -589,32 +625,34 @@ class Scheduler {
         if (c.rescanVerdict === 'verifying') c.rescanVerdict = 'pending'
       }
     }
+  }
 
-    job.verifyQueue = groups.map((_, i) => i).filter((i) => groups[i].status === 'pending')
-    if (job.verifyQueue.length === 0) return
-
-    scan.status = 'verifying'
-    addLog(
-      scan,
-      'info',
-      `Verification phase: ${job.verifyQueue.length} candidate group(s) queued — verifier clips at 24 fps, distributed across ${job.lanes.length} API key(s) × ${VERIFY_MODEL_POOL.length} verify models`,
-    )
-    this.mark(job)
-
-    const workers: Promise<void>[] = []
-    for (const lane of job.lanes) {
-      for (const m of VERIFY_MODEL_POOL) workers.push(this.verifyWorker(job, lane, m))
+  /** Incrementally (re)build candidate groups from fresh unverified matches and
+   *  push every pending group that is not already queued or in flight onto the
+   *  verify queue. Called after EVERY finished chunk so verification starts the
+   *  moment a chunk's candidates exist — the verify pipeline never waits for
+   *  the whole chunk phase. Safe against double-queueing (single-threaded). */
+  private enqueueNewGroups(job: Job, logResume = false) {
+    const { scan } = job
+    this.buildCandidateGroups(scan)
+    const groups = scan.candidateGroups || []
+    let added = 0
+    for (let i = 0; i < groups.length; i++) {
+      if (groups[i].status !== 'pending') continue
+      if (job.verifyQueue.includes(i) || job.verifyInFlight.has(i)) continue
+      job.verifyQueue.push(i)
+      added++
     }
-    await Promise.all(workers)
-
-    for (const lane of job.lanes) {
-      for (const m of MODEL_POOL) {
-        const s = this.modelState(job, lane, m)
-        if (s.state === 'active' || s.state === 'waiting') s.state = 'idle'
-        s.currentChunk = null
-      }
+    if (added > 0) {
+      addLog(
+        scan,
+        'info',
+        logResume
+          ? `Verification resume: ${added} candidate group(s) still pending — queued across ${job.lanes.length} API key(s) × ${VERIFY_MODEL_POOL.length} verify models`
+          : `Verify pipeline: ${added} new candidate group(s) queued (${job.verifyQueue.length} waiting, ${job.verifyInFlight.size} in flight) — chunk models keep scanning in parallel`,
+      )
+      this.mark(job)
     }
-    this.mark(job)
   }
 
   /** One verifier worker per (key lane × model) — pulls whole groups off the queue. */
@@ -645,7 +683,10 @@ class Scheduler {
 
       const gi = job.verifyQueue.shift()
       if (gi === undefined) {
-        if (job.verifyInFlight.size === 0) {
+        // PIPELINE PARALLELISM: while the chunk phase is still running, verify
+        // workers idle-wait — new candidate groups arrive as chunks finish.
+        // Only exit once the chunk phase is done AND nothing is in flight.
+        if (job.verifyInFlight.size === 0 && job.chunkPhaseDone) {
           if (st.state !== 'idle') {
             st.state = 'idle'
             this.mark(job)
@@ -1098,6 +1139,10 @@ class Scheduler {
         chunk.matches = matches
         chunk.status = matches.length > 0 ? 'match' : 'no_match'
         this.mergeMatches(scan, chunkIndex, matches, seg)
+        // PIPELINE PARALLELISM: this chunk's candidates go to the verify queue
+        // IMMEDIATELY — the concurrent verify workers pick them up while this
+        // chunk model moves straight on to the next chunk.
+        if (matches.length > 0) this.enqueueNewGroups(job)
 
         if (matches.length > 0) {
           addLog(scan, 'success', `${minutePrefix}Chunk ${chunkIndex}: ${matches.length} matched segment(s) found`)
