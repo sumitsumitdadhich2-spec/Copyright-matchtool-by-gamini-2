@@ -5,7 +5,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { getScan, saveScan, addLog, scanMediaDir } from '@/lib/store'
 import type { Scan } from '@/lib/types'
-import { probeDuration, chunkMovie, chunkShort, cleanupSegments } from '@/lib/ffmpeg'
+import { probeDuration, chunkShort, cleanupSegments } from '@/lib/ffmpeg'
 import { CHUNK_SECONDS } from '@/lib/models'
 
 export const runtime = 'nodejs'
@@ -172,46 +172,20 @@ async function finalizeUpload(
     scan.movieName = name
     scan.movieSize = size
     scan.movieDuration = duration
-    // Dynamic chunk count from actual duration — never hardcoded.
-    const count = Math.ceil(duration / CHUNK_SECONDS)
-    scan.chunkCount = count
-    scan.chunks = Array.from({ length: count }, (_, i) => ({ index: i, status: 'pending' as const, attempts: 0 }))
-    scan.status = 'chunking'
+    // Chunking WAITS for the trim confirmation — the user can select just the
+    // range that holds their scene (saves API quota) or confirm the full movie.
+    scan.chunkCount = 0
+    scan.chunks = []
+    scan.awaitingTrim = true
+    scan.movieTrimStart = undefined
+    scan.movieTrimEnd = undefined
+    scan.status = 'created'
     scan.chunkingProgress = 0
-    addLog(scan, 'info', `Movie uploaded: ${name} (${fmtDur(duration)}) — cutting into ${count} one-minute chunks`)
-    saveScan(scan)
-
-    // Chunk in the background; the client polls chunkingProgress.
-    void (async () => {
-      try {
-        const actual = await chunkMovie(dest, path.join(mediaDir, 'chunks'), duration, (pct) => {
-          const s = getScan(id)
-          if (s) {
-            s.chunkingProgress = pct
-            saveScan(s)
-          }
-        })
-        const s = getScan(id)
-        if (s) {
-          if (actual !== s.chunkCount) {
-            s.chunkCount = actual
-            s.chunks = Array.from({ length: actual }, (_, i) => ({ index: i, status: 'pending' as const, attempts: 0 }))
-          }
-          s.status = 'ready'
-          s.chunkingProgress = 100
-          addLog(s, 'success', `Chunking complete: ${actual} chunks ready`)
-          saveScan(s)
-        }
-      } catch (err) {
-        const s = getScan(id)
-        if (s) {
-          s.status = 'error'
-          s.error = `Chunking failed: ${err instanceof Error ? err.message : String(err)}`
-          addLog(s, 'error', s.error)
-          saveScan(s)
-        }
-      }
-    })()
+    addLog(
+      scan,
+      'info',
+      `Movie uploaded: ${name} (${fmtDur(duration)}) — select a trim range (optional) and confirm to start chunking`,
+    )
   }
 
   saveScan(scan)
