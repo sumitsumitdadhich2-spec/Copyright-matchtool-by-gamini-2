@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { FFMPEG_BIN, parseFfmpegProgress, probeDuration } from './ffmpeg'
+import { FFMPEG_BIN, parseFfmpegProgress, probeDuration, probeHasAudio } from './ffmpeg'
 import { getScan, saveScan, scanMediaDir, addLog } from './store'
 import type { RenderJob, RenderResolution, RenderSettings, Scan } from './types'
 
@@ -120,7 +120,7 @@ function freshJob(settings: RenderSettings, totalOutputSeconds: number, segmentC
  * Progress is persisted into scan.renderJob (throttled), so the existing
  * GET /api/scans/[id] polling picks it up with no extra wiring.
  */
-export function startRender(scanId: string, settings: RenderSettings): string | null {
+export async function startRender(scanId: string, settings: RenderSettings): Promise<string | null> {
   if (activeRenders.has(scanId)) return 'A render is already in progress for this scan'
 
   const scan = getScan(scanId)
@@ -138,6 +138,9 @@ export function startRender(scanId: string, settings: RenderSettings): string | 
   const mediaDir = scanMediaDir(scanId)
   const movieFile = path.join(mediaDir, 'movie.mp4')
   if (!fs.existsSync(movieFile)) return 'Original movie file not found'
+
+  // Silent movie: [i:a] filter refs would make ffmpeg fail — synthesize silence instead.
+  const hasAudio = await probeHasAudio(movieFile)
 
   const totalOut = totalStitchedSeconds(segments)
   scan.renderJob = freshJob(settings, totalOut, segments.length)
@@ -165,7 +168,12 @@ export function startRender(scanId: string, settings: RenderSettings): string | 
     filterParts.push(
       `[${i}:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,fps=${settings.fps},setsar=1[v${i}]`,
     )
-    filterParts.push(`[${i}:a]aresample=48000[a${i}]`)
+    if (hasAudio) {
+      filterParts.push(`[${i}:a]aresample=48000[a${i}]`)
+    } else {
+      const segDur = Math.max(0.1, segments[i].movieEnd - segments[i].movieStart)
+      filterParts.push(`anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration=${segDur.toFixed(3)}[a${i}]`)
+    }
     concatInputs.push(`[v${i}][a${i}]`)
   }
   filterParts.push(`${concatInputs.join('')}concat=n=${segments.length}:v=1:a=1[outv][outa]`)
