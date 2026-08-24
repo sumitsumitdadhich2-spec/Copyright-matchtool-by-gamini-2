@@ -71,6 +71,9 @@ interface Job {
   /** verification phase: candidate-group queue (indexes into scan.candidateGroups) */
   verifyQueue: number[]
   verifyInFlight: Set<number>
+  /** true once the CURRENT minute's chunk workers have all drained — verify
+   *  workers keep waiting for new candidates until this flips to true. */
+  chunkPhaseDone: boolean
   stopping: boolean
   /** pacing state keyed by `${laneIdx}|${modelId}`: earliest time the next request may be sent.
    *  Set after every request from its actual token size so every model runs at full TPM capacity. */
@@ -88,6 +91,15 @@ function ts(sec: number): string {
   const m = Math.floor(sec / 60)
   const s = sec - m * 60
   return `${String(m).padStart(2, '0')}:${s.toFixed(3).padStart(6, '0')}`
+}
+
+/** ABSOLUTE original-movie window of a chunk: chunks cover ONLY the confirmed
+ *  trim range, so every chunk's absolute start = trimStart + index * 60. */
+function chunkAbsWindow(scan: Scan, chunkIndex: number): { start: number; end: number } {
+  const trimStart = scan.movieTrimStart ?? 0
+  const rangeEnd = scan.movieTrimEnd ?? scan.movieDuration ?? Number.POSITIVE_INFINITY
+  const start = trimStart + chunkIndex * CHUNK_SECONDS
+  return { start, end: Math.min(start + CHUNK_SECONDS, rangeEnd) }
 }
 
 /** Two short-video ranges are "the same segment" when they overlap ≥50% of the shorter one. */
@@ -153,8 +165,11 @@ class Scheduler {
       if (seg.status === 'scanning' || seg.status === 'verifying') seg.status = 'pending'
       if (seg.status === 'done' && seg.chunks.some((c) => c.status === 'pending')) seg.status = 'pending'
     }
-    const pendingChunks = segments.reduce((n, s) => n + s.chunks.filter((c) => c.status === 'pending').length, 0)
-    const allSettled = segments.every((s) => s.chunks.every((c) => c.status !== 'pending' && c.status !== 'scanning'))
+    // MINUTE SELECTION: only segments with selected !== false take part in the
+    // scan (default = all selected). Unselected minutes are skipped entirely.
+    const selectedSegs = segments.filter((s) => s.selected !== false)
+    const pendingChunks = selectedSegs.reduce((n, s) => n + s.chunks.filter((c) => c.status === 'pending').length, 0)
+    const allSettled = selectedSegs.every((s) => s.chunks.every((c) => c.status !== 'pending' && c.status !== 'scanning'))
 
     // Verification-only resume: all chunks already mapped but candidate groups
     // still have pending verifier/rescan work (or matches were never verified).
@@ -164,8 +179,8 @@ class Scheduler {
 
     if (pendingChunks === 0 && !hasVerifyWork) return { ok: false, error: 'No pending chunks to scan.' }
 
-    // Mirror the first incomplete segment's chunks so the UI shows the right minute.
-    const firstIncomplete = segments.find((s) => s.status !== 'done') || segments[0]
+    // Mirror the first incomplete SELECTED segment's chunks so the UI shows the right minute.
+    const firstIncomplete = selectedSegs.find((s) => s.status !== 'done') || selectedSegs[0] || segments[0]
     scan.currentShortSegment = firstIncomplete.index
     scan.chunks = firstIncomplete.chunks
 
@@ -201,6 +216,7 @@ class Scheduler {
       inFlight: new Set(),
       verifyQueue: [],
       verifyInFlight: new Set(),
+      chunkPhaseDone: false,
       stopping: false,
       nextFreeAt: {},
       cooldownUntil: {},
@@ -247,6 +263,18 @@ class Scheduler {
     const job = this.jobs.get(scanId)
     const scan = job ? job.scan : getScan(scanId)
     if (!scan) return { ok: false, error: 'Scan not found' }
+
+    // RESCAN LOCK: a manual retry NEVER starts while the verification queue has
+    // pending candidates — verification must fully drain first.
+    const pendingVerify = (scan.candidateGroups || []).filter(
+      (g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning',
+    ).length
+    if (pendingVerify > 0) {
+      return {
+        ok: false,
+        error: `Verification in progress — ${pendingVerify} candidate group(s) pending. Retry tabhi milega jab saare candidates verify ho jayen${job ? '' : ' (Resume karke verification poori karo)'}.`,
+      }
+    }
 
     // Resolve the target segment (default: the current/selected minute).
     let seg: ShortSegmentState | null = null
@@ -797,8 +825,8 @@ class Scheduler {
         if (c.rescan !== 'found') {
           c.rescan = 'rescanning'
           this.mark(job)
-          const chunkStart = c.chunkIndex * CHUNK_SECONDS
-          const chunkEnd = Math.min(chunkStart + CHUNK_SECONDS, scan.movieDuration || chunkStart + CHUNK_SECONDS)
+          // TRIM-AWARE: the chunk's absolute window in the ORIGINAL movie.
+          const { start: chunkStart, end: chunkEnd } = chunkAbsWindow(scan, c.chunkIndex)
 
           // Reuse the original chunk file if it still exists, else cut it fresh from the movie.
           let chunkFile = chunkPath(path.join(mediaDir, 'chunks'), c.chunkIndex)
@@ -1023,8 +1051,8 @@ class Scheduler {
         if (!fs.existsSync(chunkFile)) {
           // Chunk files are cleaned up after a scan finishes — re-cut from the
           // movie so a MANUAL chunk retry works even after completion.
-          const cs = chunkIndex * CHUNK_SECONDS
-          const ce = Math.min(cs + CHUNK_SECONDS, scan.movieDuration || cs + CHUNK_SECONDS)
+          // TRIM-AWARE: chunk N starts at trimStart + N*60 in the ORIGINAL movie.
+          const { start: cs, end: ce } = chunkAbsWindow(scan, chunkIndex)
           fs.mkdirSync(chunksDir, { recursive: true })
           addLog(scan, 'info', `Chunk ${chunkIndex}: chunk file missing — re-cutting ${cs}s–${ce}s from movie`)
           await extractClipPrecise(path.join(scanMediaDir(scan.id), 'movie.mp4'), cs, ce, chunkFile)
@@ -1043,7 +1071,8 @@ class Scheduler {
 
         // Model timestamps are LOCAL to the 1-minute segment file — shift them by
         // seg.start so every stored match carries ABSOLUTE short-video seconds.
-        const matches = parseChunkMatches(raw, chunkIndex, chunkIndex * CHUNK_SECONDS, m.id).map((mm) => ({
+        // Movie offset is TRIM-AWARE: reported movie times stay absolute to the ORIGINAL movie.
+        const matches = parseChunkMatches(raw, chunkIndex, chunkAbsWindow(scan, chunkIndex).start, m.id).map((mm) => ({
           ...mm,
           shortStart: mm.shortStart + seg.start,
           shortEnd: mm.shortEnd + seg.start,
