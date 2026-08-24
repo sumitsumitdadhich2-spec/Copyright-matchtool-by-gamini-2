@@ -165,7 +165,7 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
           kind="short"
           icon={<Film className="size-5" aria-hidden />}
           title="Short video"
-          subtitle="The clip to find — auto-trimmed to first 1 min if longer"
+          subtitle="The clip to find — any length, scanned minute-by-minute (original quality preserved)"
           name={scan?.shortName}
           duration={scan?.shortDuration}
           size={scan?.shortSize}
@@ -173,6 +173,11 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
           progress={progress}
           disabled={uploading !== null}
           onFile={(f) => uploadFile('short', f)}
+          extraInfo={
+            scan?.shortSegments && scan.shortSegments.length > 1
+              ? `${scan.shortSegments.length} minutes — scanned minute-by-minute`
+              : undefined
+          }
         />
         <Dropzone
           kind="movie"
@@ -202,6 +207,20 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
           </div>
         </div>
       )}
+      {scan?.shortSegmentingProgress !== undefined && scan.shortSegmentingProgress < 100 && (
+        <div className="mt-3">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <Loader2 className="size-3.5 animate-spin text-primary" aria-hidden />
+              ffmpeg cutting short into {scan?.shortSegments?.length ?? 1} one-minute scan segment(s) — original untouched...
+            </span>
+            <span className="font-mono">{scan.shortSegmentingProgress}%</span>
+          </div>
+          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={scan.shortSegmentingProgress}>
+            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${scan.shortSegmentingProgress}%` }} />
+          </div>
+        </div>
+      )}
       {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
     </section>
   )
@@ -219,6 +238,7 @@ function Dropzone(props: {
   progress: number
   disabled: boolean
   onFile: (f: File) => void
+  extraInfo?: string
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
@@ -267,9 +287,12 @@ function Dropzone(props: {
         )}
       </div>
       {done ? (
-        <div className="w-full truncate font-mono text-xs text-muted-foreground">
-          {props.name} · {fmtTime(props.duration!)} · {props.size ? fmtBytes(props.size) : ''}
-        </div>
+        <>
+          <div className="w-full truncate font-mono text-xs text-muted-foreground">
+            {props.name} · {fmtTime(props.duration!)} · {props.size ? fmtBytes(props.size) : ''}
+          </div>
+          {props.extraInfo && <span className="text-[11px] text-primary">{props.extraInfo}</span>}
+        </>
       ) : (
         <span className="text-xs text-muted-foreground">{props.subtitle} — click or drop a file</span>
       )}
