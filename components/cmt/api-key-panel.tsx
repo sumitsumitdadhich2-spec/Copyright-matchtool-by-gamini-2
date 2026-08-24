@@ -119,7 +119,7 @@ export function ApiKeyPanel() {
               >
                 {saving === n ? 'Saving...' : saved === n ? 'Saved' : slot.hasKey ? 'Update' : 'Save'}
               </button>
-              {n !== 1 && slot.hasKey && (
+              {slot.hasKey && (
                 <button
                   type="button"
                   onClick={() => remove(n)}
