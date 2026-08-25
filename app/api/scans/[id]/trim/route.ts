@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import path from 'node:path'
 import { getScan, saveScan, addLog, scanMediaDir } from '@/lib/store'
+import { ensureLocalMedia } from '@/lib/media'
 import { chunkMovie } from '@/lib/ffmpeg'
 import { CHUNK_SECONDS } from '@/lib/models'
 
