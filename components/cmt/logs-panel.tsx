@@ -45,7 +45,7 @@ export function LogsPanel({ scan }: { scan: Scan }) {
               <span className="shrink-0 text-muted-foreground/60">
                 {new Date(l.t).toLocaleTimeString([], { hour12: false })}
               </span>
-              <span className={LEVEL_CLS[l.level] || ''}>{l.msg}</span>
+              <span className={LEVEL_CLS[l.level] || ''}>{l.msg.replace(/flash/gi, 'shiva')}</span>
             </div>
           ))
         )}
