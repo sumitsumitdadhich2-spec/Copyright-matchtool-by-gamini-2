@@ -49,7 +49,7 @@ export function ChunkResultsPanel({ scan }: { scan: Scan }) {
         </span>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
-        Har movie minute ke liye ek hi Gemini call: short video + wo chunk. HISSA 2 ki matched lines yahan dikhti
+        Har movie minute ke liye ek hi AI call: short video + wo chunk. HISSA 2 ki matched lines yahan dikhti
         hain (movie time global hai), aur full raw output arrow se dekh sakte ho.
       </p>
 
@@ -182,7 +182,7 @@ function ChunkRow({ scan, chunk, segIdx }: { scan: Scan; chunk: ChunkState; segI
           className="flex items-center gap-1 rounded-md border border-input px-2 py-1 text-[11px] font-medium hover:bg-secondary disabled:opacity-30"
         >
           {open ? <ChevronDown className="size-3.5" aria-hidden /> : <ChevronRight className="size-3.5" aria-hidden />}
-          Gemini output {raws.length > 0 ? `(${raws.length})` : ''}
+          AI output {raws.length > 0 ? `(${raws.length})` : ''}
         </button>
       </div>
       {retryError && (

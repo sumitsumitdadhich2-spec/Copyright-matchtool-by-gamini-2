@@ -88,10 +88,10 @@ export function Dashboard() {
           </span>
           <div>
             <h1 className="text-base font-semibold leading-tight tracking-tight md:text-lg">
-              Copyright Match <span className="text-primary">Tool</span>
+              Shiva <span className="text-primary">MatchTool</span>
             </h1>
             <p className="hidden font-mono text-[11px] uppercase tracking-wider text-muted-foreground sm:block">
-              Gemini scanner · 1 prompt/min · 24 fps
+              AI scanner · 1 prompt/min · 24 fps
             </p>
           </div>
         </div>

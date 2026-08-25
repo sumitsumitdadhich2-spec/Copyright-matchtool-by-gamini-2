@@ -33,7 +33,7 @@ export function ModelBoard({ scan, usage }: { scan: Scan | null; usage: Record<s
               className="rounded-lg border border-border bg-background/60 p-3 transition-colors hover:border-primary/30"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="truncate font-mono text-xs">{m.id}</span>
+                <span className="truncate font-mono text-xs">{m.id.replace('gemini-', '')}</span>
                 <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${badge.cls}`}>{badge.label}</span>
               </div>
               <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">

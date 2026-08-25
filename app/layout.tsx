@@ -7,8 +7,8 @@ const geistSans = Geist({ subsets: ['latin'], variable: '--font-geist-sans' })
 const geistMono = Geist_Mono({ subsets: ['latin'], variable: '--font-geist-mono' })
 
 export const metadata: Metadata = {
-  title: 'Copyright Match Tool',
-  description: 'Find where a short video clip appears inside a full movie using Gemini as the scanner.',
+  title: 'Shiva MatchTool',
+  description: 'Find where a short video clip appears inside a full movie using an AI scanner.',
   generator: 'v0.app',
   icons: {
     icon: [
