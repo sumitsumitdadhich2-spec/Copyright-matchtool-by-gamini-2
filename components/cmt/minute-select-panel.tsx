@@ -2,34 +2,92 @@
 
 import { useEffect, useState } from 'react'
 import { useSWRConfig } from 'swr'
-import { CheckSquare, ListChecks, Loader2, Play } from 'lucide-react'
+import { CheckSquare, Copy, ListChecks, Loader2, Play } from 'lucide-react'
 import type { Scan } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
+import { chunkOverlapsSegRange, segMovieRange } from '@/lib/segment-range'
+
+/** Parse "HH:MM:SS", "MM:SS" or plain seconds into seconds. Returns null when invalid. */
+function parseTimeInput(v: string): number | null {
+  const t = v.trim()
+  if (!t) return null
+  const parts = t.split(':').map((p) => p.trim())
+  if (parts.some((p) => p === '' || !/^\d+(\.\d+)?$/.test(p))) return null
+  if (parts.length === 1) return Number(parts[0])
+  if (parts.length === 2) return Number(parts[0]) * 60 + Number(parts[1])
+  if (parts.length === 3) return Number(parts[0]) * 3600 + Number(parts[1]) * 60 + Number(parts[2])
+  return null
+}
+
+function toHms(sec: number): string {
+  const s = Math.max(0, Math.round(sec))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const r = s % 60
+  return h > 0
+    ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`
+    : `${m}:${String(r).padStart(2, '0')}`
+}
+
+interface RangeText {
+  start: string
+  end: string
+}
 
 /** Short-video minute selection: pick exactly which minutes of the SHORT get
  *  scanned (any combination) — unselected minutes are skipped and save API
- *  quota. "Scan remaining" later adds the leftover minutes to the SAME scan;
- *  all results merge together. */
+ *  quota. PLUS: each minute can get its OWN movie search range (from–to), so
+ *  only movie chunks inside that range are scanned for that minute — big
+ *  quota saver. "Same for all" copies one range to every minute. */
 export function MinuteSelectPanel({ scan, running, refresh }: { scan: Scan; running: boolean; refresh: () => void }) {
   const segs = scan.shortSegments || []
   const [picked, setPicked] = useState<Set<number>>(new Set())
+  const [ranges, setRanges] = useState<Record<number, RangeText>>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { mutate } = useSWRConfig()
 
-  // Sync local selection from the server state whenever the scan changes.
+  const trimStart = scan.movieTrimStart ?? 0
+  const trimEnd = scan.movieTrimEnd ?? scan.movieDuration ?? 0
+
+  /** Server-side range text for one segment ('' = full window). */
+  function serverRangeText(segIndex: number): RangeText {
+    const seg = segs.find((s) => s.index === segIndex)
+    if (!seg) return { start: '', end: '' }
+    const r = segMovieRange(scan, seg)
+    return r.custom ? { start: toHms(r.start), end: toHms(r.end) } : { start: '', end: '' }
+  }
+
+  // Sync local selection + ranges from the server state whenever the scan changes.
   useEffect(() => {
     setPicked(new Set(segs.filter((s) => s.selected !== false).map((s) => s.index)))
+    const next: Record<number, RangeText> = {}
+    for (const s of segs) next[s.index] = serverRangeText(s.index)
+    setRanges(next)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scan.id, segs.length, segs.map((s) => (s.selected === false ? '0' : '1')).join('')])
+  }, [
+    scan.id,
+    segs.length,
+    segs.map((s) => (s.selected === false ? '0' : '1')).join(''),
+    segs.map((s) => `${s.movieRangeStart ?? ''}-${s.movieRangeEnd ?? ''}`).join('|'),
+  ])
 
   if (segs.length <= 1) return null
 
   const serverSelected = new Set(segs.filter((s) => s.selected !== false).map((s) => s.index))
-  const dirty = picked.size !== serverSelected.size || [...picked].some((i) => !serverSelected.has(i))
+  const rangesDirty = segs.some((s) => {
+    const srv = serverRangeText(s.index)
+    const loc = ranges[s.index] || { start: '', end: '' }
+    return srv.start !== loc.start || srv.end !== loc.end
+  })
+  const dirty = picked.size !== serverSelected.size || [...picked].some((i) => !serverSelected.has(i)) || rangesDirty
   const doneCount = segs.filter((s) => s.status === 'done').length
   const remaining = segs.filter(
-    (s) => s.status !== 'done' || s.chunks.some((c) => c.status === 'pending' || c.status === 'cancelled'),
+    (s) =>
+      s.status !== 'done' ||
+      s.chunks.some(
+        (c) => c.status === 'pending' || (c.status === 'cancelled' && chunkOverlapsSegRange(scan, s, c.index)),
+      ),
   )
   const unselectedRemaining = remaining.filter((s) => s.selected === false)
 
@@ -42,14 +100,61 @@ export function MinuteSelectPanel({ scan, running, refresh }: { scan: Scan; runn
     })
   }
 
+  function setRange(i: number, field: keyof RangeText, value: string) {
+    setRanges((prev) => ({ ...prev, [i]: { ...(prev[i] || { start: '', end: '' }), [field]: value } }))
+  }
+
+  /** Copy the first picked minute's range to ALL minutes ("same for all"). */
+  function copyToAll() {
+    const source = [...picked].sort((a, b) => a - b)[0] ?? segs[0].index
+    const src = ranges[source] || { start: '', end: '' }
+    setRanges((prev) => {
+      const next: Record<number, RangeText> = { ...prev }
+      for (const s of segs) next[s.index] = { ...src }
+      return next
+    })
+  }
+
+  /** Parse + validate all range inputs → API payload. Returns null on error. */
+  function buildRangesPayload(): { index: number; start: number | null; end: number | null }[] | null {
+    const out: { index: number; start: number | null; end: number | null }[] = []
+    for (const s of segs) {
+      const r = ranges[s.index] || { start: '', end: '' }
+      const hasStart = r.start.trim() !== ''
+      const hasEnd = r.end.trim() !== ''
+      if (!hasStart && !hasEnd) {
+        out.push({ index: s.index, start: null, end: null })
+        continue
+      }
+      const start = hasStart ? parseTimeInput(r.start) : trimStart
+      const end = hasEnd ? parseTimeInput(r.end) : trimEnd
+      if (start === null || end === null) {
+        setError(`Minute ${s.index + 1}: movie range time samajh nahi aaya — HH:MM:SS ya MM:SS format use karo`)
+        return null
+      }
+      if (end <= start) {
+        setError(`Minute ${s.index + 1}: movie range "To" time "From" ke baad hona chahiye`)
+        return null
+      }
+      if (end <= trimStart || start >= trimEnd) {
+        setError(`Minute ${s.index + 1}: movie range scanned window (${toHms(trimStart)}–${toHms(trimEnd)}) ke bahar hai`)
+        return null
+      }
+      out.push({ index: s.index, start, end })
+    }
+    return out
+  }
+
   async function apply(indexes: number[], thenResume = false) {
-    setBusy(true)
     setError(null)
+    const rangesPayload = buildRangesPayload()
+    if (!rangesPayload) return
+    setBusy(true)
     try {
       const res = await fetch(`/api/scans/${scan.id}/segments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selected: indexes }),
+        body: JSON.stringify({ selected: indexes, ranges: rangesPayload }),
       })
       if (!res.ok) {
         const j = await res.json().catch(() => ({}))
@@ -96,43 +201,73 @@ export function MinuteSelectPanel({ scan, running, refresh }: { scan: Scan; runn
         )}
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
-        Sirf selected minutes ke chunks par scan chalega — baaki skip ho kar API quota bachega. Baad me &quot;Scan
-        remaining&quot; se bache hue minutes isi scan me scan ho jayenge, sab results merge rahenge.
+        Sirf selected minutes ke chunks par scan chalega — baaki skip ho kar API quota bachega. Har minute ke liye movie
+        ka alag search range (From–To) bhi de sakte ho: us minute ke liye sirf usi range ke chunks scan honge. Khali
+        chhodo = poori movie window. &quot;Same for all&quot; se ek range sab minutes par lag jayegi.
       </p>
 
-      <div className="mt-3 grid grid-cols-2 gap-1.5 sm:grid-cols-3 md:grid-cols-4" role="group" aria-label="Minute checkboxes">
+      <div className="mt-3 grid grid-cols-1 gap-1.5 sm:grid-cols-2 md:grid-cols-3" role="group" aria-label="Minute selection with movie ranges">
         {segs.map((seg) => {
           const checked = picked.has(seg.index)
           const isDone = seg.status === 'done'
+          const r = ranges[seg.index] || { start: '', end: '' }
+          const hasRange = r.start.trim() !== '' || r.end.trim() !== ''
           return (
-            <label
+            <div
               key={seg.index}
-              className={`flex cursor-pointer items-center gap-2 rounded-md border px-2.5 py-2 text-xs transition-colors ${
-                checked ? 'border-primary bg-primary/10' : 'border-input hover:bg-secondary'
-              } ${running ? 'cursor-not-allowed opacity-60' : ''}`}
+              className={`rounded-md border px-2.5 py-2 text-xs transition-colors ${
+                checked ? 'border-primary bg-primary/10' : 'border-input'
+              } ${running ? 'opacity-60' : ''}`}
             >
-              <input
-                type="checkbox"
-                checked={checked}
-                disabled={running || busy}
-                onChange={() => toggle(seg.index)}
-                className="size-3.5 accent-primary"
-              />
-              <span className="flex flex-col">
-                <span className="font-medium">Minute {seg.index + 1}</span>
-                <span className="font-mono text-[10px] text-muted-foreground">
-                  {fmtTime(seg.start)}–{fmtTime(seg.end)}
+              <label className={`flex items-center gap-2 ${running ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={running || busy}
+                  onChange={() => toggle(seg.index)}
+                  className="size-3.5 accent-primary"
+                />
+                <span className="flex flex-col">
+                  <span className="font-medium">Minute {seg.index + 1}</span>
+                  <span className="font-mono text-[10px] text-muted-foreground">
+                    {fmtTime(seg.start)}–{fmtTime(seg.end)}
+                  </span>
                 </span>
-              </span>
-              {isDone && (
-                <span className="ml-auto text-[10px] text-success" title="Scanned + verified">
-                  ✓
-                </span>
-              )}
-              {(seg.status === 'scanning' || seg.status === 'verifying') && (
-                <span className="ml-auto inline-block size-1.5 animate-pulse rounded-full bg-primary" aria-hidden />
-              )}
-            </label>
+                {isDone && (
+                  <span className="ml-auto text-[10px] text-success" title="Scanned + verified">
+                    ✓
+                  </span>
+                )}
+                {(seg.status === 'scanning' || seg.status === 'verifying') && (
+                  <span className="ml-auto inline-block size-1.5 animate-pulse rounded-full bg-primary" aria-hidden />
+                )}
+              </label>
+
+              <div className="mt-2 flex items-center gap-1.5">
+                <span className={`text-[10px] ${hasRange ? 'text-primary' : 'text-muted-foreground'}`}>Movie:</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={r.start}
+                  disabled={running || busy}
+                  onChange={(e) => setRange(seg.index, 'start', e.target.value)}
+                  placeholder={toHms(trimStart)}
+                  aria-label={`Minute ${seg.index + 1}: movie search from (HH:MM:SS)`}
+                  className="w-full min-w-0 rounded border border-input bg-background px-1.5 py-1 font-mono text-[10px] focus:border-primary focus:outline-none disabled:opacity-50"
+                />
+                <span className="text-[10px] text-muted-foreground">–</span>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={r.end}
+                  disabled={running || busy}
+                  onChange={(e) => setRange(seg.index, 'end', e.target.value)}
+                  placeholder={toHms(trimEnd)}
+                  aria-label={`Minute ${seg.index + 1}: movie search to (HH:MM:SS)`}
+                  className="w-full min-w-0 rounded border border-input bg-background px-1.5 py-1 font-mono text-[10px] focus:border-primary focus:outline-none disabled:opacity-50"
+                />
+              </div>
+            </div>
           )
         })}
       </div>
@@ -153,6 +288,15 @@ export function MinuteSelectPanel({ scan, running, refresh }: { scan: Scan; runn
           className="rounded-md border border-input px-3 py-1.5 text-xs font-medium hover:bg-secondary disabled:opacity-40"
         >
           Clear
+        </button>
+        <button
+          type="button"
+          onClick={copyToAll}
+          disabled={running || busy}
+          title="Pehle selected minute ki movie range sab minutes par copy karo"
+          className="flex items-center gap-1.5 rounded-md border border-input px-3 py-1.5 text-xs font-medium hover:bg-secondary disabled:opacity-40"
+        >
+          <Copy className="size-3.5" aria-hidden /> Same for all
         </button>
         <button
           type="button"

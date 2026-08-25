@@ -55,6 +55,12 @@ export interface ShortSegmentState {
   chunks: ChunkState[]
   /** user minute selection: false = skipped by the scheduler (default true) */
   selected?: boolean
+  /** PER-MINUTE movie search range (ABSOLUTE original-movie seconds).
+   *  When set, this minute is scanned ONLY against movie chunks overlapping
+   *  this range — all other chunks are skipped (API quota saver).
+   *  Unset = search the whole trim window. */
+  movieRangeStart?: number
+  movieRangeEnd?: number
 }
 
 // ---------- Render / Export ----------

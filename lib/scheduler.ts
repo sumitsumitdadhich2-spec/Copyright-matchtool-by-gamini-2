@@ -28,6 +28,7 @@ import {
   scanMediaDir,
 } from './store'
 import { chunkPath, cleanupChunks, cleanupClips, extractClipPrecise, extractSegment, segmentPath } from './ffmpeg'
+import { chunkOverlapsSegRange, segMovieRange } from './segment-range'
 import {
   getClient,
   uploadVideo,
@@ -157,10 +158,14 @@ class Scheduler {
     const segments = scan.shortSegments!
 
     // Reset orphaned "scanning" chunks + resume cancelled ones ACROSS ALL segments.
+    // PER-MINUTE MOVIE RANGE: chunks outside a minute's chosen movie range are
+    // marked cancelled (skipped) so only in-range chunks consume API quota.
     for (const seg of segments) {
       for (const c of seg.chunks) {
+        const inRange = chunkOverlapsSegRange(scan, seg, c.index)
         if (c.status === 'scanning') c.status = 'pending'
-        if (resume && c.status === 'cancelled') c.status = 'pending'
+        if (resume && c.status === 'cancelled' && inRange) c.status = 'pending'
+        if (c.status === 'pending' && !inRange) c.status = 'cancelled'
       }
       if (seg.status === 'scanning' || seg.status === 'verifying') seg.status = 'pending'
       if (seg.status === 'done' && seg.chunks.some((c) => c.status === 'pending')) seg.status = 'pending'
@@ -444,7 +449,9 @@ class Scheduler {
         job.queue = pending.map((c) => c.index)
         job.chunkPhaseDone = false
         if (multi) {
-          addLog(scan, 'info', `Minute ${seg.index + 1}/${segments.length}: scanning short ${ts(seg.start)}–${ts(seg.end)} against ${pending.length} pending movie chunk(s)`)
+          const r = segMovieRange(scan, seg)
+          const rangeNote = r.custom ? ` (movie range ${ts(r.start)}–${ts(r.end)} only — baaki chunks skipped)` : ''
+          addLog(scan, 'info', `Minute ${seg.index + 1}/${segments.length}: scanning short ${ts(seg.start)}–${ts(seg.end)} against ${pending.length} pending movie chunk(s)${rangeNote}`)
         }
         addLog(
           scan,
