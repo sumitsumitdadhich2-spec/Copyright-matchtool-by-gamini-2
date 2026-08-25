@@ -3,7 +3,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import type { Scan, ScanSummary, LogEntry } from './types'
 import { MODEL_POOL } from './models'
-import { backupScanToBlob, deleteScanBlob } from './scan-blob'
+import { backupScanToBlob, deleteScanBlob, fetchScanFromBlob } from './scan-blob'
 
 // On Vercel the project directory is read-only; only /tmp is writable.
 // Using /tmp there also keeps the data dir out of build output tracing.

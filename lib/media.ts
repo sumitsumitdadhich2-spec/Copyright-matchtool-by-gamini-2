@@ -130,7 +130,7 @@ export async function finalizeUploadedMedia(
         ? `Short video uploaded to Blob storage: ${name} (${fmtDur(duration)}) — scanned minute-by-minute (${segCount} segments), original preserved`
         : `Short video uploaded to Blob storage: ${name} (${fmtDur(duration)}) — original preserved, scan copy cut in background`,
     )
-    saveScan(scan)
+    saveScan(scan, { immediate: true })
 
     // Background: cut 24 fps / 640px scan segments — original untouched.
     const segDir = path.join(mediaDir, 'segments')
@@ -188,7 +188,7 @@ export async function finalizeUploadedMedia(
     )
   }
 
-  saveScan(scan)
+  saveScan(scan, { immediate: true })
   invalidateUsageCache()
   return { ok: true, duration, size }
 }
