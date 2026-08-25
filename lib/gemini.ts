@@ -32,9 +32,10 @@ export async function uploadVideo(ai: GoogleGenAI, filePath: string): Promise<{ 
   const file = await ai.files.upload({ file: filePath, config: { mimeType: 'video/mp4' } })
   let f = file
   const deadline = Date.now() + 5 * 60_000
+  // FAST POLLING: check every 2s so the pipeline moves the moment the file is ACTIVE.
   while (f.state === 'PROCESSING') {
     if (Date.now() > deadline) throw new GeminiError('other', 'File processing timed out')
-    await new Promise((r) => setTimeout(r, 2500))
+    await new Promise((r) => setTimeout(r, 2000))
     f = await ai.files.get({ name: f.name! })
   }
   if (f.state !== 'ACTIVE') throw new GeminiError('other', `File upload failed (state=${f.state})`)

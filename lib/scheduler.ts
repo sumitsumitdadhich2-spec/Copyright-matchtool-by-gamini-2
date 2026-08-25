@@ -58,6 +58,10 @@ interface KeyLane {
   segUris: Map<number, string>
   /** per-segment in-flight upload locks so two workers never double-upload */
   segUriPromises: Map<number, Promise<string>>
+  /** PIPELINING: pre-cut + pre-uploaded movie chunks on THIS key —
+   *  chunkIndex -> in-flight/finished upload. Consumed (removed) on use,
+   *  because every chunk upload is one-shot (deleted after its request). */
+  chunkUploads: Map<number, Promise<{ uri: string; name: string }>>
 }
 
 interface Job {
@@ -204,6 +208,7 @@ class Scheduler {
       ai: getClient(k),
       segUris: new Map(),
       segUriPromises: new Map(),
+      chunkUploads: new Map(),
     }))
 
     const minuteNote = segments.length > 1 ? ` across ${segments.length} short minutes (scanned sequentially)` : ''
@@ -420,6 +425,74 @@ class Scheduler {
       lane.segUriPromises.set(seg.index, p)
     }
     return p
+  }
+
+  /** Per-chunk cut locks so two lanes/workers never cut the SAME chunk file at once. */
+  private cutLocks = new Map<string, Promise<string>>()
+
+  /** Ensure the chunk's local file exists (re-cut from the movie if missing).
+   *  Cut exactly once even when multiple lanes need it at the same time. */
+  private async ensureChunkFile(scan: Scan, chunkIndex: number): Promise<string> {
+    const chunksDir = path.join(scanMediaDir(scan.id), 'chunks')
+    const chunkFile = chunkPath(chunksDir, chunkIndex)
+    if (fs.existsSync(chunkFile)) return chunkFile
+    const key = `${scan.id}|${chunkIndex}`
+    let p = this.cutLocks.get(key)
+    if (!p) {
+      p = (async () => {
+        // TRIM-AWARE: chunk N starts at trimStart + N*60 in the ORIGINAL movie.
+        const { start: cs, end: ce } = chunkAbsWindow(scan, chunkIndex)
+        fs.mkdirSync(chunksDir, { recursive: true })
+        addLog(scan, 'info', `Chunk ${chunkIndex}: chunk file missing — re-cutting ${cs}s–${ce}s from movie`)
+        await extractClipPrecise(path.join(scanMediaDir(scan.id), 'movie.mp4'), cs, ce, chunkFile)
+        return chunkFile
+      })().finally(() => this.cutLocks.delete(key))
+      this.cutLocks.set(key, p)
+    }
+    return p
+  }
+
+  /** Start (or join) the upload of one movie chunk on this key lane.
+   *  Used both by the active worker and by background prefetch. */
+  private startChunkUpload(job: Job, lane: KeyLane, chunkIndex: number, prefetch: boolean): Promise<{ uri: string; name: string }> {
+    let p = lane.chunkUploads.get(chunkIndex)
+    if (p) return p
+    p = (async () => {
+      const file = await this.ensureChunkFile(job.scan, chunkIndex)
+      if (prefetch) {
+        addLog(job.scan, 'info', `Pipeline: chunk ${chunkIndex} pre-uploading in background (key ${lane.idx}) — ready before its turn`)
+        this.mark(job)
+      }
+      return uploadVideo(lane.ai, file)
+    })()
+    lane.chunkUploads.set(chunkIndex, p)
+    // A failed prefetch must never poison the cache — the consumer re-uploads fresh.
+    p.catch(() => lane.chunkUploads.delete(chunkIndex))
+    return p
+  }
+
+  /** Consume (and remove) this lane's upload for a chunk — one-shot use,
+   *  because the worker deletes the remote file right after its request. */
+  private takeChunkUpload(job: Job, lane: KeyLane, chunkIndex: number): Promise<{ uri: string; name: string }> {
+    const p = this.startChunkUpload(job, lane, chunkIndex, false)
+    lane.chunkUploads.delete(chunkIndex)
+    return p
+  }
+
+  /** PIPELINING: while this lane's model is busy analyzing, pre-cut + pre-upload
+   *  the next queued chunks on the SAME key so the next analysis starts with
+   *  ZERO upload wait. Depth 2 keeps bandwidth + Files API usage sane. */
+  private prefetchNextChunks(job: Job, lane: KeyLane) {
+    if (job.stopping) return
+    const PREFETCH_DEPTH = 2
+    let started = 0
+    for (const ci of job.queue) {
+      if (started >= PREFETCH_DEPTH) break
+      if (!lane.chunkUploads.has(ci)) {
+        void this.startChunkUpload(job, lane, ci, true).catch(() => {})
+      }
+      started++
+    }
   }
 
   private async runScan(job: Job) {
@@ -1005,6 +1078,14 @@ class Scheduler {
   }
 
   private finish(job: Job) {
+    // Pipelining cleanup: delete any pre-uploaded chunks that were never consumed
+    // (best effort — Files API entries expire on their own anyway).
+    for (const lane of job.lanes) {
+      for (const p of lane.chunkUploads.values()) {
+        p.then((f) => deleteFileQuiet(lane.ai, f.name)).catch(() => {})
+      }
+      lane.chunkUploads.clear()
+    }
     if (job.saverTimer) clearInterval(job.saverTimer)
     saveScan(job.scan)
     this.jobs.delete(job.scan.id)
@@ -1086,8 +1167,23 @@ class Scheduler {
 
       let chunkFileName: string | null = null
       try {
-        // Per-model pacing (TPM ≈ 1 request/min per model per key).
+        // PARALLEL UPLOADS: the short-minute segment + THIS movie chunk upload
+        // AT THE SAME TIME (Promise.all) — and the per-model pacing wait
+        // (TPM ≈ 1 request/min per model per key) overlaps with those uploads
+        // too, so nothing waits on anything it doesn't have to.
         const rk = this.rateKey(lane, m)
+        const uploadsP = Promise.all([
+          this.ensureSegmentUri(job, lane, seg),
+          this.takeChunkUpload(job, lane, chunkIndex),
+        ])
+        // Rejection is handled at the await below — this only prevents an
+        // unhandled-rejection crash while the pacing sleep is running.
+        uploadsP.catch(() => {})
+
+        // PIPELINING: start pre-cutting + pre-uploading the NEXT queued chunks
+        // on this key in the background right away.
+        this.prefetchNextChunks(job, lane)
+
         const wait = (job.nextFreeAt[rk] || 0) - Date.now()
         if (wait > 0) {
           st.state = 'waiting'
@@ -1097,23 +1193,7 @@ class Scheduler {
           this.mark(job)
         }
 
-        // The uploaded SHORT file is the current minute's re-encoded segment
-        // (uploaded once per key lane per minute; original short.mp4 untouched).
-        const shortUri = await this.ensureSegmentUri(job, lane, seg)
-
-        // Upload THIS chunk for THIS key (Files API uploads are per key).
-        const chunksDir = path.join(scanMediaDir(scan.id), 'chunks')
-        const chunkFile = chunkPath(chunksDir, chunkIndex)
-        if (!fs.existsSync(chunkFile)) {
-          // Chunk files are cleaned up after a scan finishes — re-cut from the
-          // movie so a MANUAL chunk retry works even after completion.
-          // TRIM-AWARE: chunk N starts at trimStart + N*60 in the ORIGINAL movie.
-          const { start: cs, end: ce } = chunkAbsWindow(scan, chunkIndex)
-          fs.mkdirSync(chunksDir, { recursive: true })
-          addLog(scan, 'info', `Chunk ${chunkIndex}: chunk file missing — re-cutting ${cs}s–${ce}s from movie`)
-          await extractClipPrecise(path.join(scanMediaDir(scan.id), 'movie.mp4'), cs, ce, chunkFile)
-        }
-        const uploaded = await uploadVideo(lane.ai, chunkFile)
+        const [shortUri, uploaded] = await uploadsP
         chunkFileName = uploaded.name
 
         job.nextFreeAt[rk] = Date.now() + MODEL_MIN_INTERVAL_MS
@@ -1122,6 +1202,10 @@ class Scheduler {
         this.mark(job)
 
         addLog(scan, 'info', `${minutePrefix}Chunk ${chunkIndex}: mapping short → movie minute ${chunkIndex} on ${m.id} (key ${lane.idx})`)
+        // PIPELINING: while Gemini analyzes THIS chunk, the next chunk's
+        // cut + upload runs in the background — analysis khatam hote hi agla
+        // segment ready milta hai, wait zero.
+        this.prefetchNextChunks(job, lane)
         const raw = await mapChunkRequest(lane.ai, m.id, shortUri, uploaded.uri)
         this.recordChunkOutput(chunk, m.id, raw)
 
