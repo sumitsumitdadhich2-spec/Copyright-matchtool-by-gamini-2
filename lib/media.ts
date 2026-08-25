@@ -102,7 +102,13 @@ export async function finalizeUploadedMedia(
   let duration: number
   try {
     duration = await probeDuration(dest)
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[media] probeDuration failed:', msg)
+    // Binary missing/setup failure is a SERVER problem, not a bad video.
+    if (msg.includes('binary not found') || msg.includes('ENOENT')) {
+      return { ok: false, error: 'Video processing setup failed on the server. Please try again in a moment.' }
+    }
     return { ok: false, error: 'Could not read video file. Is it a valid video?' }
   }
 
@@ -130,7 +136,7 @@ export async function finalizeUploadedMedia(
         ? `Short video uploaded to Blob storage: ${name} (${fmtDur(duration)}) — scanned minute-by-minute (${segCount} segments), original preserved`
         : `Short video uploaded to Blob storage: ${name} (${fmtDur(duration)}) — original preserved, scan copy cut in background`,
     )
-    saveScan(scan)
+    saveScan(scan, { immediate: true })
 
     // Background: cut 24 fps / 640px scan segments — original untouched.
     const segDir = path.join(mediaDir, 'segments')
@@ -188,7 +194,7 @@ export async function finalizeUploadedMedia(
     )
   }
 
-  saveScan(scan)
+  saveScan(scan, { immediate: true })
   invalidateUsageCache()
   return { ok: true, duration, size }
 }

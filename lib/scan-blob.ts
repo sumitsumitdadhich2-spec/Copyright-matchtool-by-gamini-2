@@ -70,6 +70,34 @@ export function backupScanToBlob(scan: Scan, immediate = false) {
   }
 }
 
+/** Awaitable flush: uploads the scan JSON to Blob RIGHT NOW and resolves when
+ *  it lands. Use in route handlers before returning a response, because on
+ *  Vercel the instance freezes after the response and fire-and-forget writes
+ *  can be cut off. */
+export async function flushScanToBlob(scan: Scan): Promise<void> {
+  const id = scan.id
+  latestPayload.set(id, JSON.stringify(scan))
+  const t = pendingTimers.get(id)
+  if (t) {
+    clearTimeout(t)
+    pendingTimers.delete(id)
+  }
+  await uploadNow(id)
+}
+
+/** Fetch a single scan record straight from Blob (cross-instance fresh read).
+ *  Returns null when the record doesn't exist or can't be parsed. */
+export async function fetchScanFromBlob(id: string): Promise<Scan | null> {
+  try {
+    const result = await get(blobPath(id), { access: 'private' })
+    if (!result || result.statusCode === 304) return null
+    const text = await new Response(result.stream).text()
+    return JSON.parse(text) as Scan
+  } catch {
+    return null
+  }
+}
+
 /** Delete ALL of a scan's Blob data: the JSON record AND its videos (media/{id}/...). */
 export async function deleteScanBlob(id: string) {
   try {
