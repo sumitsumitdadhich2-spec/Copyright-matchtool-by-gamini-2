@@ -2,9 +2,11 @@
 
 import { useState } from 'react'
 import useSWR from 'swr'
-import { Play, Square, RotateCcw, Loader2, ScanSearch, Settings } from 'lucide-react'
+import { Play, Square, RotateCcw, Loader2, LogOut, ScanSearch, Settings, Users } from 'lucide-react'
 import type { Scan } from '@/lib/types'
 import { fetcher } from '@/lib/format'
+import { useAuth } from '@/components/auth/auth-gate'
+import { UsersDialog } from '@/components/auth/users-dialog'
 import { SettingsDialog } from './settings-dialog'
 import { UploadPanel } from './upload-panel'
 import { TrimPanel } from './trim-panel'
@@ -30,6 +32,8 @@ export function Dashboard() {
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [usersOpen, setUsersOpen] = useState(false)
+  const { user, logout } = useAuth()
 
   const { data, mutate } = useSWR<ScanResponse>(scanId ? `/api/scans/${scanId}` : null, fetcher, {
     refreshInterval: (latest) => {
@@ -157,10 +161,33 @@ export function Dashboard() {
             <Settings className="size-4" aria-hidden />
             <span className="hidden sm:inline">Settings</span>
           </button>
+          {user.role === 'admin' && (
+            <button
+              type="button"
+              onClick={() => setUsersOpen(true)}
+              aria-label="Manage users"
+              title="Manage users — create and control IDs"
+              className="btn-press flex items-center gap-1.5 rounded-lg border border-input bg-card px-3 py-2 text-sm font-medium hover:border-primary/40 hover:bg-secondary"
+            >
+              <Users className="size-4" aria-hidden />
+              <span className="hidden sm:inline">Users</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => logout()}
+            aria-label={`Log out ${user.username}`}
+            title={`Logged in as ${user.username} — log out`}
+            className="btn-press flex items-center gap-1.5 rounded-lg border border-input bg-card px-3 py-2 text-sm font-medium hover:border-destructive/40 hover:bg-secondary"
+          >
+            <LogOut className="size-4" aria-hidden />
+            <span className="hidden sm:inline">{user.username}</span>
+          </button>
         </div>
       </header>
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {user.role === 'admin' && <UsersDialog open={usersOpen} onClose={() => setUsersOpen(false)} />}
 
       {actionError && (
         <p role="alert" className="alert-in rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
