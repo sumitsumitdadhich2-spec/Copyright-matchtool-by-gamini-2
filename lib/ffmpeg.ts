@@ -2,19 +2,10 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { CHUNK_SECONDS } from './models'
+import { getFfmpegPath, getFfprobePath } from './ffmpeg-bin'
 
-const FFMPEG = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg')
-const FFPROBE = path.join(
-  process.cwd(),
-  'node_modules',
-  'ffprobe-static',
-  'bin',
-  process.platform,
-  process.arch,
-  process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe',
-)
-
-function run(bin: string, args: string[], onStderr?: (line: string) => void): Promise<string> {
+async function run(binPromise: Promise<string>, args: string[], onStderr?: (line: string) => void): Promise<string> {
+  const bin = await binPromise
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args)
     let stdout = ''
@@ -34,7 +25,7 @@ function run(bin: string, args: string[], onStderr?: (line: string) => void): Pr
 }
 
 export async function probeDuration(file: string): Promise<number> {
-  const out = await run(FFPROBE, [
+  const out = await run(getFfprobePath(), [
     '-v', 'error',
     '-show_entries', 'format=duration',
     '-of', 'csv=p=0',
@@ -48,7 +39,7 @@ export async function probeDuration(file: string): Promise<number> {
 /** True when the file has at least one audio stream (silent movies need a synthesized track for concat). */
 export async function probeHasAudio(file: string): Promise<boolean> {
   try {
-    const out = await run(FFPROBE, [
+    const out = await run(getFfprobePath(), [
       '-v', 'error',
       '-select_streams', 'a',
       '-show_entries', 'stream=codec_type',
