@@ -393,11 +393,11 @@ class Scheduler {
           addLog(job.scan, 'info', `Minute ${seg.index + 1}: segment file missing — re-cutting ${ts(seg.start)}–${ts(seg.end)} from the original short`)
           await extractSegment(path.join(mediaDir, 'short.mp4'), seg.start, seg.end, file)
         }
-        addLog(job.scan, 'info', `Uploading short minute ${seg.index + 1} to Gemini Files API (key ${lane.idx})...`)
+        addLog(job.scan, 'info', `Uploading short minute ${seg.index + 1} to the scanner (key ${lane.idx})...`)
         this.mark(job)
         const f = await uploadVideo(lane.ai, file)
         lane.segUris.set(seg.index, f.uri)
-        addLog(job.scan, 'success', `Short minute ${seg.index + 1} ready on Gemini (key ${lane.idx})`)
+        addLog(job.scan, 'success', `Short minute ${seg.index + 1} ready on the scanner (key ${lane.idx})`)
         this.mark(job)
         return f.uri
       })().catch((err) => {

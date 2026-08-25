@@ -2,7 +2,7 @@
 
 import { Cpu } from 'lucide-react'
 import type { Scan, ModelLiveState } from '@/lib/types'
-import { MODEL_POOL } from '@/lib/models'
+import { MODEL_POOL, displayModelName } from '@/lib/models'
 
 const STATE_LABEL: Record<ModelLiveState['state'], { label: string; cls: string }> = {
   idle: { label: 'idle', cls: 'bg-muted text-muted-foreground' },
@@ -33,7 +33,7 @@ export function ModelBoard({ scan, usage }: { scan: Scan | null; usage: Record<s
               className="rounded-lg border border-border bg-background/60 p-3 transition-colors hover:border-primary/30"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="truncate font-mono text-xs">{m.id}</span>
+                <span className="truncate font-mono text-xs">{displayModelName(m.id)}</span>
                 <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${badge.cls}`}>{badge.label}</span>
               </div>
               <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
@@ -44,7 +44,7 @@ export function ModelBoard({ scan, usage }: { scan: Scan | null; usage: Record<s
                   <span className="font-mono text-primary">chunk {live.currentChunk}</span>
                 )}
               </div>
-              <div className="progress-track mt-1.5 !h-1" role="progressbar" aria-valuenow={pct} aria-label={`${m.id} daily usage`}>
+              <div className="progress-track mt-1.5 !h-1" role="progressbar" aria-valuenow={pct} aria-label={`${displayModelName(m.id)} daily usage`}>
                 <div
                   className={`progress-fill ${exhausted ? '!bg-destructive' : ''}`}
                   style={{ width: `${pct}%` }}

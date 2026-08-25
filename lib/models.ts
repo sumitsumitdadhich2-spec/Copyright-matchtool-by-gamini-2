@@ -59,6 +59,12 @@ export function isPaddedVerifyModel(id: string): boolean {
   return PADDED_VERIFY_MODEL_POOL.some((m) => m.id === id)
 }
 
+/** UI-ONLY display name: strips the vendor prefix and shows "flash" as "shiva".
+ * NEVER use this for API calls — real model ids stay unchanged in the backend. */
+export function displayModelName(id: string): string {
+  return id.replace('gemini-', '').replace(/flash/gi, 'shiva')
+}
+
 /** Full pool (chunk + verify) — used by the UI model board and reports. */
 export const MODEL_POOL: ModelSpec[] = [...CHUNK_MODEL_POOL, ...VERIFY_MODEL_POOL]
 
