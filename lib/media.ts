@@ -102,7 +102,13 @@ export async function finalizeUploadedMedia(
   let duration: number
   try {
     duration = await probeDuration(dest)
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[media] probeDuration failed:', msg)
+    // Binary missing/setup failure is a SERVER problem, not a bad video.
+    if (msg.includes('binary not found') || msg.includes('ENOENT')) {
+      return { ok: false, error: 'Video processing setup failed on the server. Please try again in a moment.' }
+    }
     return { ok: false, error: 'Could not read video file. Is it a valid video?' }
   }
 
