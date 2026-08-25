@@ -1,11 +1,16 @@
 import { NextResponse } from 'next/server'
 import { scheduler } from '@/lib/scheduler'
+import { getSession } from '@/lib/users'
+import { getAllUserApiKeys } from '@/lib/user-keys'
 
 export const runtime = 'nodejs'
 
 /** MANUAL chunk retry: re-runs the chunk-map for one chunk on the locked
  * chunk models (gemini-3.6-flash / gemini-3.7-flash). */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string; index: string }> }) {
+  const session = await getSession()
+  if (!session) return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 })
+
   const { id, index } = await params
   const chunkIndex = Number.parseInt(index, 10)
   if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
@@ -21,6 +26,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       return NextResponse.json({ ok: false, error: 'Invalid segment index' }, { status: 400 })
     }
   }
-  const result = await scheduler.retryChunk(id, chunkIndex, segmentIndex)
+  // PER-USER KEYS: retry runs on the logged-in user's own keys (needed when the
+  // retry has to restart a finished scan in resume mode).
+  const userApiKeys = await getAllUserApiKeys(session.username)
+  const result = await scheduler.retryChunk(id, chunkIndex, segmentIndex, userApiKeys)
   return NextResponse.json(result, { status: result.ok ? 200 : 400 })
 }
