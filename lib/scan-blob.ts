@@ -68,11 +68,15 @@ export function backupScanToBlob(scan: Scan) {
   }
 }
 
-/** Delete a scan's Blob backup (used when pruning old scans). */
+/** Delete ALL of a scan's Blob data: the JSON record AND its videos (media/{id}/...). */
 export async function deleteScanBlob(id: string) {
   try {
-    const { blobs } = await list({ prefix: blobPath(id) })
-    if (blobs.length) await del(blobs.map((b) => b.url))
+    const [record, media] = await Promise.all([
+      list({ prefix: blobPath(id) }),
+      list({ prefix: `media/${id}/` }),
+    ])
+    const urls = [...record.blobs, ...media.blobs].map((b) => b.url)
+    if (urls.length) await del(urls)
   } catch (err) {
     console.error('[scan-blob] delete failed:', err instanceof Error ? err.message : err)
   }

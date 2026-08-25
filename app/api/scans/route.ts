@@ -1,13 +1,15 @@
 import { NextResponse } from 'next/server'
 import { listScans, newScan, pruneOldScans, MAX_SCANS, SCANS_DIR } from '@/lib/store'
 import { restoreScansFromBlob } from '@/lib/scan-blob'
+import { getBlobUsage, BLOB_LIMIT_BYTES } from '@/lib/media'
 
 export const runtime = 'nodejs'
 
 export async function GET() {
   // After a cold start /tmp is empty — pull scan records back from Blob first.
   await restoreScansFromBlob(SCANS_DIR)
-  return NextResponse.json({ scans: listScans() })
+  const used = await getBlobUsage()
+  return NextResponse.json({ scans: listScans(), storage: { used, limit: BLOB_LIMIT_BYTES } })
 }
 
 export async function POST() {

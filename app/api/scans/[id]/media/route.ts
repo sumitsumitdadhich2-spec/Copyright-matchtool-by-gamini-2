@@ -1,18 +1,24 @@
 import fs from 'node:fs'
-import path from 'node:path'
-import { getScan, scanMediaDir } from '@/lib/store'
+import { getScan, SCANS_DIR } from '@/lib/store'
+import { restoreScansFromBlob } from '@/lib/scan-blob'
+import { ensureLocalMedia } from '@/lib/media'
 
 export const runtime = 'nodejs'
+export const maxDuration = 300
 
-/** Serve uploaded videos with HTTP Range support so previews are seekable. */
+/** Serve uploaded videos with HTTP Range support so previews are seekable.
+ *  If /tmp was wiped (cold start) the video is pulled back from Blob first. */
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params
-  if (!getScan(id)) return new Response('Not found', { status: 404 })
+  if (!getScan(id)) {
+    await restoreScansFromBlob(SCANS_DIR)
+    if (!getScan(id)) return new Response('Not found', { status: 404 })
+  }
 
   const url = new URL(req.url)
   const kind = url.searchParams.get('kind') === 'short' ? 'short' : 'movie'
-  const file = path.join(scanMediaDir(id), `${kind}.mp4`)
-  if (!fs.existsSync(file)) return new Response('File not found', { status: 404 })
+  const file = await ensureLocalMedia(id, kind)
+  if (!file) return new Response('File not found', { status: 404 })
 
   const stat = fs.statSync(file)
   const range = req.headers.get('range')

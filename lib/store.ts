@@ -150,20 +150,28 @@ export function pruneOldScans(keep: number = MAX_SCANS): string[] {
   const toDelete = all.slice(keep)
   const deleted: string[] = []
   for (const s of toDelete) {
-    try {
-      fs.rmSync(scanFile(s.id), { force: true })
-    } catch {
-      // ignore
-    }
-    try {
-      fs.rmSync(path.join(MEDIA_DIR, s.id), { recursive: true, force: true })
-    } catch {
-      // ignore
-    }
-    void deleteScanBlob(s.id)
+    deleteScan(s.id)
     deleted.push(s.id)
   }
   return deleted
+}
+
+/**
+ * Delete a scan EVERYWHERE: JSON record, local media files (/tmp) and ALL
+ * Blob objects (scan record + full videos) so the 10 GB storage frees up.
+ */
+export function deleteScan(id: string) {
+  try {
+    fs.rmSync(scanFile(id), { force: true })
+  } catch {
+    // ignore
+  }
+  try {
+    fs.rmSync(path.join(MEDIA_DIR, id), { recursive: true, force: true })
+  } catch {
+    // ignore
+  }
+  void deleteScanBlob(id)
 }
 
 export function newScan(): Scan {
