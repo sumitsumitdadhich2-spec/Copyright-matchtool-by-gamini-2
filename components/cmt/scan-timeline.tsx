@@ -49,7 +49,7 @@ export function ScanTimeline({ scan }: { scan: Scan }) {
 
   if (scan.chunkCount === 0) {
     return (
-      <section aria-label="Scan timeline" className="rounded-lg border border-border bg-card p-4">
+      <section aria-label="Scan timeline" className="panel">
         <h2 className="text-sm font-semibold">Scan Timeline</h2>
         <p className="mt-2 text-xs text-muted-foreground">Upload a movie to see the minute-by-minute timeline.</p>
       </section>
@@ -60,7 +60,7 @@ export function ScanTimeline({ scan }: { scan: Scan }) {
   const done = chunks.filter((c) => c.status === 'match' || c.status === 'no_match').length
 
   return (
-    <section aria-label="Scan timeline" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="Scan timeline" className="panel">
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="text-sm font-semibold">Scan Timeline</h2>
         {multi && (
@@ -86,10 +86,10 @@ export function ScanTimeline({ scan }: { scan: Scan }) {
                 aria-selected={isSel}
                 onClick={() => setSelected(seg.index === activeSeg ? null : seg.index)}
                 title={`Short ${fmtTime(seg.start)}–${fmtTime(seg.end)} — ${SEG_STATUS_LABEL[seg.status]}`}
-                className={`flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-mono text-[10px] transition-colors ${
+                className={`btn-press flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-mono text-[10px] ${
                   isSel
-                    ? 'border-primary bg-primary/15 text-primary'
-                    : 'border-input text-muted-foreground hover:bg-secondary'
+                    ? 'border-primary bg-primary/15 text-primary shadow-sm shadow-primary/20'
+                    : 'border-input text-muted-foreground hover:border-primary/40 hover:bg-secondary'
                 }`}
               >
                 Min {seg.index + 1}
@@ -112,7 +112,7 @@ export function ScanTimeline({ scan }: { scan: Scan }) {
             title={`Minute ${c.index} (${fmtTime(c.index * 60)}) — ${c.status}${c.model ? ` · ${c.model}` : ''}${
               c.confidence !== undefined ? ` · conf ${c.confidence}` : ''
             }`}
-            className={`h-5 w-5 rounded-sm ${STATUS_CLASS[c.status] || 'bg-muted'} transition-colors`}
+            className={`h-5 w-5 rounded-sm ${STATUS_CLASS[c.status] || 'bg-muted'} transition-all duration-300 hover:scale-125 hover:ring-2 hover:ring-primary/50`}
           />
         ))}
       </div>

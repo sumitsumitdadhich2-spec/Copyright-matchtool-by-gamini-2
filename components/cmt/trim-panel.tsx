@@ -172,7 +172,7 @@ export function TrimPanel({ scan, refresh }: { scan: Scan; refresh: () => void }
   }, [dur])
 
   return (
-    <section aria-label="Movie trim" className="rounded-lg border border-primary/40 bg-card p-4">
+    <section aria-label="Movie trim" className="panel border-primary/40">
       <div className="flex flex-wrap items-center gap-2">
         <Scissors className="size-4 text-primary" aria-hidden />
         <h2 className="text-sm font-semibold">Trim Movie — Sirf Apna Scene Wala Hissa Scan Karo</h2>

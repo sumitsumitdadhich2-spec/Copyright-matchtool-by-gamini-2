@@ -84,7 +84,7 @@ export function MinuteSelectPanel({ scan, running, refresh }: { scan: Scan; runn
   }
 
   return (
-    <section aria-label="Short minute selection" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="Short minute selection" className="panel">
       <div className="flex flex-wrap items-center gap-2">
         <ListChecks className="size-4 text-primary" aria-hidden />
         <h2 className="text-sm font-semibold">Short Minutes — Kaunse Minute Scan Karne Hain?</h2>

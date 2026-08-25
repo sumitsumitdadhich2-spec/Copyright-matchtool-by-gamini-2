@@ -35,7 +35,7 @@ export function ChunkResultsPanel({ scan }: { scan: Scan }) {
   if (visible.length === 0 && !multi) return null
 
   return (
-    <section aria-label="Chunk timeline results" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="Chunk timeline results" className="panel">
       <div className="flex flex-wrap items-center gap-2">
         <Clock3 className="size-4 text-primary" aria-hidden />
         <h2 className="text-sm font-semibold">Chunk Timeline — Matches Per Minute</h2>

@@ -73,7 +73,7 @@ export function ApiKeyPanel() {
   }
 
   return (
-    <section aria-label="API key settings" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="API key settings" className="panel">
       {slots.map((slot) => {
         const n = slot.index
         const Icon = n === 1 ? KeyRound : ShieldCheck

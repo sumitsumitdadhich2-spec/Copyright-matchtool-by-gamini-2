@@ -77,7 +77,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
   const duration = pair.shortEnd - pair.shortStart
 
   return (
-    <section aria-label="Side-by-side comparison" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="Side-by-side comparison" className="panel">
       <div className="flex flex-wrap items-center gap-2">
         <SplitSquareHorizontal className="size-4 text-primary" aria-hidden />
         <h2 className="text-sm font-semibold">Side-by-Side Match Comparison</h2>

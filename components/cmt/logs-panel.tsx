@@ -21,7 +21,7 @@ export function LogsPanel({ scan }: { scan: Scan }) {
   }, [scan.logs.length])
 
   return (
-    <section aria-label="Live logs" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="Live logs" className="panel">
       <div className="flex items-center gap-2">
         <Terminal className="size-4 text-primary" aria-hidden />
         <h2 className="text-sm font-semibold">Live Logs</h2>

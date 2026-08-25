@@ -39,7 +39,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
     >
       <div
         ref={panelRef}
-        className="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-background shadow-xl"
+        className="panel flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden !p-0 shadow-2xl"
       >
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">
           <Settings className="size-4 text-primary" aria-hidden />
@@ -48,7 +48,7 @@ export function SettingsDialog({ open, onClose }: SettingsDialogProps) {
             type="button"
             onClick={onClose}
             aria-label="Close settings"
-            className="ml-auto rounded-md p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+            className="btn-press ml-auto rounded-md p-1.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
           >
             <X className="size-4" aria-hidden />
           </button>

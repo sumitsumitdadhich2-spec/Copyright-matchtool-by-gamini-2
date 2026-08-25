@@ -10,7 +10,7 @@ export function ReportPanel({ scan }: { scan: Scan }) {
   const matches = report.matches || []
 
   return (
-    <section aria-label="Final report" className="rounded-lg border border-success/30 bg-card p-4">
+    <section aria-label="Final report" className="panel border-success/30">
       <div className="flex items-center gap-2">
         <FileCheck2 className="size-4 text-success" aria-hidden />
         <h2 className="text-sm font-semibold">Final Report</h2>

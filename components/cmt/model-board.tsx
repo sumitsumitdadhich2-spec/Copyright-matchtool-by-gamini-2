@@ -14,7 +14,7 @@ const STATE_LABEL: Record<ModelLiveState['state'], { label: string; cls: string 
 
 export function ModelBoard({ scan, usage }: { scan: Scan | null; usage: Record<string, number> | null }) {
   return (
-    <section aria-label="Model status board" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="Model status board" className="panel">
       <div className="flex items-center gap-2">
         <Cpu className="size-4 text-primary" aria-hidden />
         <h2 className="text-sm font-semibold">Model Pool</h2>
@@ -28,7 +28,10 @@ export function ModelBoard({ scan, usage }: { scan: Scan | null; usage: Record<s
           const badge = STATE_LABEL[state]
           const pct = Math.min(100, Math.round((used / m.rpd) * 100))
           return (
-            <div key={m.id} className="rounded-md border border-border bg-background p-3">
+            <div
+              key={m.id}
+              className="rounded-lg border border-border bg-background/60 p-3 transition-colors hover:border-primary/30"
+            >
               <div className="flex items-center justify-between gap-2">
                 <span className="truncate font-mono text-xs">{m.id}</span>
                 <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${badge.cls}`}>{badge.label}</span>
@@ -41,9 +44,9 @@ export function ModelBoard({ scan, usage }: { scan: Scan | null; usage: Record<s
                   <span className="font-mono text-primary">chunk {live.currentChunk}</span>
                 )}
               </div>
-              <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={pct} aria-label={`${m.id} daily usage`}>
+              <div className="progress-track mt-1.5 !h-1" role="progressbar" aria-valuenow={pct} aria-label={`${m.id} daily usage`}>
                 <div
-                  className={`h-full rounded-full transition-all ${exhausted ? 'bg-destructive' : 'bg-primary'}`}
+                  className={`progress-fill ${exhausted ? '!bg-destructive' : ''}`}
                   style={{ width: `${pct}%` }}
                 />
               </div>

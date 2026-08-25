@@ -19,7 +19,7 @@ export function CandidatesPanel({ scan }: { scan: Scan }) {
   const totalCandidates = groups.reduce((n, g) => n + g.candidates.length, 0)
 
   return (
-    <section aria-label="Match candidates" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="Match candidates" className="panel">
       <div className="flex items-center gap-2">
         <Target className="size-4 text-destructive" aria-hidden />
         <h2 className="text-sm font-semibold">Match Candidates</h2>
