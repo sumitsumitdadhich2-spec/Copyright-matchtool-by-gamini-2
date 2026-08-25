@@ -18,14 +18,14 @@ export function HistoryPanel({ activeId, onSelect, onNew }: { activeId: string |
   const scans = data?.scans || []
 
   return (
-    <section aria-label="Scan history" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="Scan history" className="panel">
       <div className="flex items-center gap-2">
         <History className="size-4 text-primary" aria-hidden />
         <h2 className="text-sm font-semibold">Scan History</h2>
         <button
           type="button"
           onClick={onNew}
-          className="ml-auto flex items-center gap-1 rounded-md border border-input px-2 py-1 text-xs font-medium hover:bg-secondary"
+          className="btn-press ml-auto flex items-center gap-1 rounded-lg border border-input px-2.5 py-1 text-xs font-medium hover:border-primary/40 hover:bg-secondary"
         >
           <Plus className="size-3.5" aria-hidden /> New scan
         </button>
@@ -39,8 +39,10 @@ export function HistoryPanel({ activeId, onSelect, onNew }: { activeId: string |
               <button
                 type="button"
                 onClick={() => onSelect(s.id)}
-                className={`w-full rounded-md border p-2 text-left text-xs transition-colors ${
-                  s.id === activeId ? 'border-primary/50 bg-primary/5' : 'border-border bg-background hover:bg-secondary'
+                className={`btn-press w-full rounded-lg border p-2.5 text-left text-xs ${
+                  s.id === activeId
+                    ? 'border-primary/50 bg-primary/10 shadow-md shadow-primary/10'
+                    : 'border-border bg-background/60 hover:border-primary/30 hover:bg-secondary'
                 }`}
               >
                 <div className="flex items-center gap-2">

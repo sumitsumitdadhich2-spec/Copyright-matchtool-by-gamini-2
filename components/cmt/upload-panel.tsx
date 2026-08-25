@@ -158,7 +158,7 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
   const chunking = scan?.status === 'chunking'
 
   return (
-    <section aria-label="Upload videos" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="Upload videos" className="panel">
       <h2 className="text-sm font-semibold">Source Files</h2>
       <div className="mt-3 grid gap-3 md:grid-cols-2">
         <Dropzone
@@ -202,8 +202,8 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
             </span>
             <span className="font-mono">{scan?.chunkingProgress}%</span>
           </div>
-          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={scan?.chunkingProgress}>
-            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${scan?.chunkingProgress || 0}%` }} />
+          <div className="progress-track mt-1.5" role="progressbar" aria-valuenow={scan?.chunkingProgress}>
+            <div className="progress-fill" style={{ width: `${scan?.chunkingProgress || 0}%` }} />
           </div>
         </div>
       )}
@@ -216,8 +216,8 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
             </span>
             <span className="font-mono">{scan.shortSegmentingProgress}%</span>
           </div>
-          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar" aria-valuenow={scan.shortSegmentingProgress}>
-            <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${scan.shortSegmentingProgress}%` }} />
+          <div className="progress-track mt-1.5" role="progressbar" aria-valuenow={scan.shortSegmentingProgress}>
+            <div className="progress-fill" style={{ width: `${scan.shortSegmentingProgress}%` }} />
           </div>
         </div>
       )}
@@ -262,8 +262,12 @@ function Dropzone(props: {
       onDragLeave={() => setDragOver(false)}
       onDrop={onDrop}
       disabled={props.disabled}
-      className={`flex flex-col items-start gap-1 rounded-md border border-dashed p-4 text-left transition-colors ${
-        dragOver ? 'border-primary bg-primary/10' : done ? 'border-success/40 bg-success/5' : 'border-input hover:border-primary/60'
+      className={`btn-press flex flex-col items-start gap-1 rounded-lg border border-dashed p-4 text-left ${
+        dragOver
+          ? 'scale-[1.01] border-primary bg-primary/10'
+          : done
+            ? 'border-success/40 bg-success/5'
+            : 'border-input hover:border-primary/60 hover:bg-primary/5'
       } disabled:opacity-60`}
     >
       <input

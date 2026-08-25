@@ -145,7 +145,7 @@ export function RenderPanel({ scan }: { scan: Scan }) {
   const elapsed = rendering && job?.startedAt ? Math.round((Date.now() - job.startedAt) / 1000) : 0
 
   return (
-    <section aria-label="Render and export" className="rounded-lg border border-border bg-card p-4">
+    <section aria-label="Render and export" className="panel">
       <div className="flex flex-wrap items-center gap-2">
         <Clapperboard className="size-4 text-primary" aria-hidden />
         <h2 className="text-sm font-semibold">Render — Stitched Movie Scenes</h2>

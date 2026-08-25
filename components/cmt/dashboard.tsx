@@ -81,21 +81,23 @@ export function Dashboard() {
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-4 p-4 md:p-6">
-      <header className="flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-2.5">
-          <span className="flex size-9 items-center justify-center rounded-md bg-primary/15 text-primary">
+      <header className="alert-in sticky top-3 z-20 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card/80 p-3 shadow-lg backdrop-blur-md md:px-4">
+        <div className="flex items-center gap-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary/30 to-primary/10 text-primary ring-1 ring-primary/30">
             <ScanSearch className="size-5" aria-hidden />
           </span>
           <div>
-            <h1 className="text-lg font-semibold leading-tight">Copyright Match Tool</h1>
-            <p className="text-xs text-muted-foreground">Gemini-powered clip-in-movie scanner · one prompt per movie minute · 24 fps</p>
+            <h1 className="text-base font-semibold leading-tight tracking-tight md:text-lg">Copyright Match Tool</h1>
+            <p className="hidden text-xs text-muted-foreground sm:block">
+              Gemini-powered clip-in-movie scanner · one prompt per minute · 24 fps
+            </p>
           </div>
         </div>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
           {(status === 'scanning' || status === 'verifying') && (
             <>
-              <span className="flex items-center gap-1.5 rounded-full bg-primary/15 px-3 py-1 text-xs text-primary">
+              <span className="pill-live flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/15 px-3 py-1 text-xs font-medium text-primary">
                 <Loader2 className="size-3.5 animate-spin" aria-hidden />
                 {(() => {
                   const segCount = scan?.shortSegments?.length ?? 0
@@ -111,7 +113,7 @@ export function Dashboard() {
                     (g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning',
                   ).length
                   return active > 0 ? (
-                    <span className="flex items-center gap-1.5 rounded-full bg-amber-500/15 px-3 py-1 text-xs text-amber-600 dark:text-amber-400">
+                    <span className="flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning/15 px-3 py-1 text-xs font-medium text-warning">
                       <Loader2 className="size-3.5 animate-spin" aria-hidden />
                       Verify pipeline: {active} group(s)
                     </span>
@@ -123,7 +125,7 @@ export function Dashboard() {
             type="button"
             onClick={() => action('start')}
             disabled={!canStart || busy}
-            className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40"
+            className="btn-press flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-md shadow-primary/25 hover:shadow-lg hover:shadow-primary/30 disabled:opacity-40 disabled:shadow-none"
           >
             <Play className="size-4" aria-hidden /> Start scan
           </button>
@@ -131,7 +133,7 @@ export function Dashboard() {
             type="button"
             onClick={() => action('start', { resume: true })}
             disabled={!canResume || busy}
-            className="flex items-center gap-1.5 rounded-md border border-input px-4 py-2 text-sm font-medium hover:bg-secondary disabled:opacity-40"
+            className="btn-press flex items-center gap-1.5 rounded-lg border border-input bg-card px-4 py-2 text-sm font-medium hover:border-primary/40 hover:bg-secondary disabled:opacity-40"
           >
             <RotateCcw className="size-4" aria-hidden /> Resume
           </button>
@@ -139,7 +141,7 @@ export function Dashboard() {
             type="button"
             onClick={() => action('stop')}
             disabled={!canStop || busy}
-            className="flex items-center gap-1.5 rounded-md border border-destructive/50 px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10 disabled:opacity-40"
+            className="btn-press flex items-center gap-1.5 rounded-lg border border-destructive/50 bg-card px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10 disabled:opacity-40"
           >
             <Square className="size-4" aria-hidden /> Stop
           </button>
@@ -148,7 +150,7 @@ export function Dashboard() {
             onClick={() => setSettingsOpen(true)}
             aria-label="Open settings"
             title="Settings — API keys"
-            className="flex items-center gap-1.5 rounded-md border border-input px-3 py-2 text-sm font-medium hover:bg-secondary"
+            className="btn-press flex items-center gap-1.5 rounded-lg border border-input bg-card px-3 py-2 text-sm font-medium hover:border-primary/40 hover:bg-secondary"
           >
             <Settings className="size-4" aria-hidden />
             <span className="hidden sm:inline">Settings</span>
@@ -159,12 +161,12 @@ export function Dashboard() {
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
 
       {actionError && (
-        <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="alert-in rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {actionError}
         </p>
       )}
       {scan?.error && (
-        <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p role="alert" className="alert-in rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Scan error: {scan.error}
         </p>
       )}
