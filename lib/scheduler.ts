@@ -143,10 +143,12 @@ class Scheduler {
     if (scan.currentShortSegment === undefined) scan.currentShortSegment = 0
   }
 
-  async start(scanId: string, resume: boolean): Promise<{ ok: boolean; error?: string }> {
+  async start(scanId: string, resume: boolean, userApiKeys?: string[]): Promise<{ ok: boolean; error?: string }> {
     if (this.jobs.has(scanId)) return { ok: false, error: 'Scan already running' }
-    const apiKeys = getAllApiKeys()
-    if (apiKeys.length === 0) return { ok: false, error: 'No Gemini API key configured. Add it in Settings first.' }
+    // PER-USER KEYS: the route passes the logged-in user's own keys (from Blob).
+    // Falls back to legacy global keys only if none are passed.
+    const apiKeys = userApiKeys && userApiKeys.length > 0 ? userApiKeys : getAllApiKeys()
+    if (apiKeys.length === 0) return { ok: false, error: 'No Gemini API key configured. Add YOUR key in Settings first.' }
     const scan = getScan(scanId)
     if (!scan) return { ok: false, error: 'Scan not found' }
     if (!scan.shortDuration || !scan.movieDuration || scan.chunkCount === 0) {

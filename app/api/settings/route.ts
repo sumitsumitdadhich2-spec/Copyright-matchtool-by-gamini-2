@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server'
-import { getApiKey, getApiKeyN, setApiKeyN, clearApiKeyN, getAllUsage, MAX_API_KEYS } from '@/lib/store'
+import { getAllUsage, MAX_API_KEYS } from '@/lib/store'
+import { getUserKeyN, setUserKeyN, clearUserKeyN } from '@/lib/user-keys'
+import { getSession } from '@/lib/users'
 import { MODEL_POOL } from '@/lib/models'
 
 export const runtime = 'nodejs'
@@ -9,12 +11,15 @@ function mask(key: string) {
 }
 
 export async function GET() {
+  const session = await getSession()
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
   const keys: { index: number; hasKey: boolean; maskedKey: string | null }[] = []
   for (let n = 1; n <= MAX_API_KEYS; n++) {
-    const k = getApiKeyN(n)
+    const k = await getUserKeyN(session.username, n)
     keys.push({ index: n, hasKey: Boolean(k), maskedKey: k ? mask(k) : null })
   }
-  const key1 = getApiKey()
+  const key1 = await getUserKeyN(session.username, 1)
   return NextResponse.json({
     keys,
     maxKeys: MAX_API_KEYS,
@@ -29,6 +34,10 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const session = await getSession()
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const username = session.username
+
   const body = (await req.json()) as Record<string, unknown>
 
   // ----- Clear a key slot: { clear: n } -----
@@ -37,7 +46,7 @@ export async function POST(req: Request) {
     if (!Number.isInteger(n) || n < 1 || n > MAX_API_KEYS) {
       return NextResponse.json({ error: 'Invalid key slot' }, { status: 400 })
     }
-    clearApiKeyN(n)
+    await clearUserKeyN(username, n)
     return NextResponse.json({ ok: true })
   }
 
@@ -59,7 +68,7 @@ export async function POST(req: Request) {
     }
     for (let other = 1; other <= MAX_API_KEYS; other++) {
       if (other === u.n) continue
-      const otherKey = updates.find((x) => x.n === other)?.key ?? getApiKeyN(other)
+      const otherKey = updates.find((x) => x.n === other)?.key ?? (await getUserKeyN(username, other))
       if (otherKey && otherKey === u.key) {
         return NextResponse.json(
           { error: `Key ${u.n} must be DIFFERENT from Key ${other} — the same key gives no extra quota` },
@@ -69,6 +78,6 @@ export async function POST(req: Request) {
     }
   }
 
-  for (const u of updates) setApiKeyN(u.n, u.key)
+  for (const u of updates) await setUserKeyN(username, u.n, u.key)
   return NextResponse.json({ ok: true })
 }
