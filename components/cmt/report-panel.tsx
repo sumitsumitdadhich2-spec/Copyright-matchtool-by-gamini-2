@@ -3,6 +3,7 @@
 import { FileCheck2 } from 'lucide-react'
 import type { Scan } from '@/lib/types'
 import { fmtTime, fmtDuration } from '@/lib/format'
+import { displayModelName } from '@/lib/models'
 
 export function ReportPanel({ scan }: { scan: Scan }) {
   const report = scan.report
@@ -62,7 +63,7 @@ export function ReportPanel({ scan }: { scan: Scan }) {
                     </td>
                     <td className="py-1 pr-2">{(m.movieEnd - m.movieStart).toFixed(3)}s</td>
                     <td className="py-1 pr-2 text-muted-foreground">{m.chunkIndex}</td>
-                    <td className="py-1 pr-2 text-muted-foreground">{m.model.replace('gemini-', '')}</td>
+                    <td className="py-1 pr-2 text-muted-foreground">{displayModelName(m.model)}</td>
                     <td className="py-1">
                       {m.verified ? (
                         <span className="text-success">{m.viaRescan ? 'yes (rescan)' : 'yes'}</span>

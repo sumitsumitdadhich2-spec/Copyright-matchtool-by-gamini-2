@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, Pause, Play, RotateCcw, SplitSquareHorizontal } from 'lucide-react'
 import type { Scan } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
+import { displayModelName } from '@/lib/models'
 
 /** Side-by-side preview of matched windows: each parsed "Short X --> Movie Y" line
  *  is one pair with (near-)equal durations on both sides. */
@@ -159,7 +160,7 @@ export function ComparePanel({ scan }: { scan: Scan }) {
         >
           <RotateCcw className="size-3.5" aria-hidden /> Restart match
         </button>
-        <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">{pair.model}</span>
+        <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 font-mono text-xs">{displayModelName(pair.model)}</span>
       </div>
     </section>
   )

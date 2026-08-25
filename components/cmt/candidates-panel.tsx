@@ -4,6 +4,7 @@ import { useRef, useState } from 'react'
 import { Target, Play, ShieldCheck, ShieldX, ShieldQuestion, RefreshCw, Loader2 } from 'lucide-react'
 import type { Scan, CandidateGroup, CandidateEntry } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
+import { displayModelName } from '@/lib/models'
 
 const GROUP_BADGE: Record<CandidateGroup['status'], { label: string; cls: string }> = {
   pending: { label: 'Pending verify', cls: 'bg-muted text-muted-foreground' },
@@ -131,11 +132,11 @@ function CandidateRow({ scan, g, c, index }: { scan: Scan; g: CandidateGroup; c:
       </div>
       <div className="mt-1 grid gap-0.5 text-xs text-muted-foreground">
         <span>
-          Found by <span className="font-mono">{c.model.replace('gemini-', '')}</span>
+          Found by <span className="font-mono">{displayModelName(c.model)}</span>
           {c.verifierModel && (
             <>
               {' · verified by '}
-              <span className="font-mono">{c.verifierModel.replace('gemini-', '')}</span>
+              <span className="font-mono">{displayModelName(c.verifierModel)}</span>
             </>
           )}
         </span>

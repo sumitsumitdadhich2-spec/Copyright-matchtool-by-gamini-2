@@ -5,6 +5,7 @@ import { useSWRConfig } from 'swr'
 import { ChevronDown, ChevronRight, Clock3, FileText, RotateCcw } from 'lucide-react'
 import type { Scan, ChunkState } from '@/lib/types'
 import { fmtTime } from '@/lib/format'
+import { displayModelName } from '@/lib/models'
 
 const CHUNK_SECONDS = 60
 
@@ -153,7 +154,7 @@ function ChunkRow({ scan, chunk, segIdx }: { scan: Scan; chunk: ChunkState; segI
           {matches.map((f, i) => (
             <span
               key={`${f.shortStart}-${f.movieStart}-${i}`}
-              title={`Short ${fmtTime(f.shortStart)}–${fmtTime(f.shortEnd)} → Movie ${fmtTime(f.movieStart)}–${fmtTime(f.movieEnd)} · ${f.model}`}
+              title={`Short ${fmtTime(f.shortStart)}–${fmtTime(f.shortEnd)} → Movie ${fmtTime(f.movieStart)}–${fmtTime(f.movieEnd)} · ${displayModelName(f.model)}`}
               className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/15 px-2 py-0.5 font-mono text-[10px] text-primary"
             >
               {fmtTime(f.shortStart)}–{fmtTime(f.shortEnd)}
@@ -196,7 +197,7 @@ function ChunkRow({ scan, chunk, segIdx }: { scan: Scan; chunk: ChunkState; segI
             <div key={`${r.t}-${i}`} className="rounded-md border border-border bg-card">
               <div className="flex flex-wrap items-center gap-2 border-b border-border px-2 py-1">
                 <FileText className="size-3.5 text-muted-foreground" aria-hidden />
-                <span className="font-mono text-[10px] text-muted-foreground">{r.model}</span>
+                <span className="font-mono text-[10px] text-muted-foreground">{displayModelName(r.model)}</span>
                 <span className="ml-auto font-mono text-[10px] text-muted-foreground">
                   {new Date(r.t).toLocaleTimeString()}
                 </span>
