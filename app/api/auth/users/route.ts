@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from 'next/server'
 import { createUser, deleteUser, readUsers, requireAdmin, resetUserPassword, setUserDisabled } from '@/lib/users'
+import { deleteUserKeys } from '@/lib/user-keys'
 
 // All user-management endpoints are admin-only (shiva).
 
@@ -69,5 +70,7 @@ export async function DELETE(request: NextRequest) {
 
   const ok = await deleteUser(username)
   if (!ok) return NextResponse.json({ error: 'User not found' }, { status: 404 })
+  // Also wipe the deleted account's private API-key file in Blob.
+  await deleteUserKeys(username)
   return NextResponse.json({ ok: true })
 }

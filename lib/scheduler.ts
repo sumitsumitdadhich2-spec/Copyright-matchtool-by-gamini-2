@@ -21,7 +21,6 @@ import {
   getScan,
   saveScan,
   addLog,
-  getAllApiKeys,
   getModelUsage,
   incrementModelUsage,
   setModelExhausted,
@@ -145,10 +144,11 @@ class Scheduler {
 
   async start(scanId: string, resume: boolean, userApiKeys?: string[]): Promise<{ ok: boolean; error?: string }> {
     if (this.jobs.has(scanId)) return { ok: false, error: 'Scan already running' }
-    // PER-USER KEYS: the route passes the logged-in user's own keys (from Blob).
-    // Falls back to legacy global keys only if none are passed.
-    const apiKeys = userApiKeys && userApiKeys.length > 0 ? userApiKeys : getAllApiKeys()
-    if (apiKeys.length === 0) return { ok: false, error: 'No Gemini API key configured. Add YOUR key in Settings first.' }
+    // PER-USER KEYS ONLY: the route passes the logged-in user's own keys
+    // (from their private Blob file). There is NO shared/global fallback —
+    // every user scans strictly on their own keys.
+    const apiKeys = userApiKeys ?? []
+    if (apiKeys.length === 0) return { ok: false, error: 'No Gemini API key configured for YOUR account. Add your key in Settings first.' }
     const scan = getScan(scanId)
     if (!scan) return { ok: false, error: 'Scan not found' }
     if (!scan.shortDuration || !scan.movieDuration || scan.chunkCount === 0) {
@@ -266,7 +266,12 @@ class Scheduler {
    *  Works while a scan is running (re-queues on the live job) AND after it has
    *  finished (restarts the scheduler in resume mode; the chunk file is re-cut
    *  from the movie automatically if it was cleaned up). */
-  async retryChunk(scanId: string, chunkIndex: number, segmentIndex?: number): Promise<{ ok: boolean; error?: string }> {
+  async retryChunk(
+    scanId: string,
+    chunkIndex: number,
+    segmentIndex?: number,
+    userApiKeys?: string[],
+  ): Promise<{ ok: boolean; error?: string }> {
     const job = this.jobs.get(scanId)
     const scan = job ? job.scan : getScan(scanId)
     if (!scan) return { ok: false, error: 'Scan not found' }
@@ -340,10 +345,11 @@ class Scheduler {
       return { ok: true }
     }
 
-    // No live job — persist the reset state and restart in resume mode.
+    // No live job — persist the reset state and restart in resume mode
+    // using the SAME user's own keys that were passed in.
     if (scan.status === 'done' || scan.status === 'stopped' || scan.status === 'error') scan.status = 'stopped'
     saveScan(scan)
-    return this.start(scanId, true)
+    return this.start(scanId, true, userApiKeys)
   }
 
   private mark(job: Job) {
