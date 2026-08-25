@@ -95,7 +95,7 @@ export async function chunkMovie(
     '-reset_timestamps', '1',
     pattern,
   )
-  await run(FFMPEG, args, (line) => {
+  await run(getFfmpegPath(), args, (line) => {
     const t = parseFfmpegTime(line)
     if (t !== null) onProgress(Math.min(99, Math.round((t / rangeDur) * 100)))
   })
@@ -121,7 +121,7 @@ export async function chunkShort(
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true })
   const pattern = path.join(outDir, 'seg-%04d.mp4')
   await run(
-    FFMPEG,
+    getFfmpegPath(),
     [
       '-y',
       '-i', shortFile,
@@ -163,8 +163,10 @@ export function cleanupSegments(outDir: string) {
 
 // ---------- Render/export helpers (used by lib/render.ts) ----------
 
-/** Absolute path to the bundled ffmpeg binary (render pipeline spawns its own process for kill support). */
-export const FFMPEG_BIN = FFMPEG
+/** Absolute path to a runnable ffmpeg binary (render pipeline spawns its own process for kill support). */
+export function getFfmpegBin(): Promise<string> {
+  return getFfmpegPath()
+}
 
 /** Parse an ffmpeg progress line into { time, speed } (either may be null). */
 export function parseFfmpegProgress(line: string): { time: number | null; speed: number | null } {
@@ -182,7 +184,7 @@ export async function extractSegment(
   outFile: string,
 ): Promise<void> {
   const dur = Math.max(1, end - start)
-  await run(FFMPEG, [
+  await run(getFfmpegPath(), [
     '-y',
     '-ss', start.toFixed(2),
     '-i', sourceFile,
@@ -204,7 +206,7 @@ export async function extractClipPrecise(
   outFile: string,
 ): Promise<void> {
   const dur = Math.max(1, end - start)
-  await run(FFMPEG, [
+  await run(getFfmpegPath(), [
     '-y',
     '-ss', Math.max(0, start).toFixed(3),
     '-i', sourceFile,

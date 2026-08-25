@@ -38,15 +38,17 @@ async function uploadNow(id: string) {
   }
 }
 
-/** Fire-and-forget: mirror the scan JSON to Blob (throttled, trailing flush). */
-export function backupScanToBlob(scan: Scan) {
+/** Fire-and-forget: mirror the scan JSON to Blob (throttled, trailing flush).
+ *  Pass immediate=true for state changes that OTHER serverless instances must
+ *  see right away (e.g. upload finalized) — skips the throttle window. */
+export function backupScanToBlob(scan: Scan, immediate = false) {
   const id = scan.id
   latestPayload.set(id, JSON.stringify(scan))
 
   const isFinal = scan.status === 'done' || scan.status === 'error' || scan.finishedAt != null
   const elapsed = Date.now() - (lastUpload.get(id) || 0)
 
-  if (isFinal || elapsed >= THROTTLE_MS) {
+  if (immediate || isFinal || elapsed >= THROTTLE_MS) {
     const t = pendingTimers.get(id)
     if (t) {
       clearTimeout(t)

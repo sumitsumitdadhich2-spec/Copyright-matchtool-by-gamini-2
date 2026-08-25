@@ -226,11 +226,41 @@ export function getScan(id: string): Scan | null {
   return scan
 }
 
-export function saveScan(scan: Scan) {
+export function saveScan(scan: Scan, opts?: { immediate?: boolean }) {
   if (scan.logs.length > 600) scan.logs = scan.logs.slice(-500)
+  scan.updatedAt = Date.now()
   writeJSON(scanFile(scan.id), scan)
   // Mirror to Blob storage (throttled, fire-and-forget) so results survive restarts.
-  backupScanToBlob(scan)
+  backupScanToBlob(scan, opts?.immediate === true)
+}
+
+/**
+ * Cross-instance safe read: on Vercel every request may land on a DIFFERENT
+ * serverless instance with its own /tmp. The local copy can therefore be
+ * stale (e.g. missing a video that was just finalized on another instance).
+ * This compares the local copy with the Blob mirror and returns the newer
+ * one, refreshing the local file when Blob wins.
+ */
+export async function getFreshScan(id: string): Promise<Scan | null> {
+  const local = getScan(id)
+  let remote: Scan | null = null
+  try {
+    remote = await fetchScanFromBlob(id)
+  } catch {
+    // Blob unreachable — fall back to local.
+  }
+  if (!remote) return local
+  if (!local) {
+    writeJSON(scanFile(id), remote)
+    return getScan(id)
+  }
+  const localAt = local.updatedAt ?? 0
+  const remoteAt = remote.updatedAt ?? 0
+  if (remoteAt > localAt) {
+    writeJSON(scanFile(id), remote)
+    return getScan(id)
+  }
+  return local
 }
 
 export function listScans(): ScanSummary[] {

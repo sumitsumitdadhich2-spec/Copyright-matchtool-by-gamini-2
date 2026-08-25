@@ -188,6 +188,8 @@ export interface ScanReport {
 export interface Scan {
   id: string
   createdAt: number
+  /** Last save timestamp — used to pick the freshest copy across serverless instances. */
+  updatedAt?: number
   status: ScanStatus
   shortName: string | null
   movieName: string | null

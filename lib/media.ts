@@ -96,7 +96,7 @@ export async function finalizeUploadedMedia(
   const id = scan.id
   const dest = await ensureLocalMedia(id, kind, true)
   if (!dest) return { ok: false, error: 'Video not found in storage — upload may have failed. Please try again.' }
-  const size = fs.statSync(dest).size
+  const size = fs.statSync(/*turbopackIgnore: true*/ dest).size
   const mediaDir = scanMediaDir(id)
 
   let duration: number
