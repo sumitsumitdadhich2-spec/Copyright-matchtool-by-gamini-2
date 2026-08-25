@@ -7,6 +7,7 @@ import type { Scan } from '@/lib/types'
 import { fetcher } from '@/lib/format'
 import { useAuth } from '@/components/auth/auth-gate'
 import { UsersDialog } from '@/components/auth/users-dialog'
+import { TokenBadge, TokensExhaustedBanner, useTokens } from './token-badge'
 import { SettingsDialog } from './settings-dialog'
 import { UploadPanel } from './upload-panel'
 import { TrimPanel } from './trim-panel'
@@ -34,6 +35,7 @@ export function Dashboard() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [usersOpen, setUsersOpen] = useState(false)
   const { user, logout } = useAuth()
+  const { tokens, exhausted, refreshTokens } = useTokens()
 
   const { data, mutate } = useSWR<ScanResponse>(scanId ? `/api/scans/${scanId}` : null, fetcher, {
     refreshInterval: (latest) => {
@@ -49,7 +51,9 @@ export function Dashboard() {
   const running = data?.running || false
   const status = scan?.status
 
-  const canStart = Boolean(scan && !running && status === 'ready' && scan.chunkCount > 0)
+  // Scan is BLOCKED when a normal user's tokens are exhausted (admin is unlimited).
+  const scanBlocked = user.role !== 'admin' && exhausted
+  const canStart = Boolean(scan && !running && status === 'ready' && scan.chunkCount > 0 && !scanBlocked)
   // Segments-aware: any incomplete minute (or any resumable chunk inside one) allows Resume.
   const hasResumableWork = Boolean(
     scan &&
@@ -81,6 +85,7 @@ export function Dashboard() {
       setActionError(j.error || 'Action failed')
     }
     void mutate()
+    refreshTokens()
   }
 
   return (
@@ -101,6 +106,7 @@ export function Dashboard() {
         </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
+          <TokenBadge tokens={tokens} />
           {(status === 'scanning' || status === 'verifying') && (
             <>
               <span className="pill-live flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/15 px-3 py-1 text-xs font-medium text-primary">
@@ -188,6 +194,8 @@ export function Dashboard() {
 
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       {user.role === 'admin' && <UsersDialog open={usersOpen} onClose={() => setUsersOpen(false)} />}
+
+      {scanBlocked && <TokensExhaustedBanner tokens={tokens} />}
 
       {actionError && (
         <p role="alert" className="alert-in rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">

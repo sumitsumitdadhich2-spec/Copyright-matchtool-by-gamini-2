@@ -2,12 +2,13 @@
 
 import { useState } from 'react'
 import useSWR from 'swr'
-import { KeyRound, Loader2, Plus, Trash2, UserX, UserCheck, Users, X } from 'lucide-react'
+import { Coins, KeyRound, Loader2, Plus, Trash2, UserX, UserCheck, Users, X } from 'lucide-react'
 
 interface ManagedUser {
   username: string
   createdAt: string
   disabled: boolean
+  tokens: number
 }
 
 async function usersFetcher(url: string): Promise<{ users: ManagedUser[] }> {
@@ -66,6 +67,18 @@ export function UsersDialog({ open, onClose }: { open: boolean; onClose: () => v
     if (!pw) return
     const ok = await call('PATCH', { username, password: pw })
     if (ok) setNotice(`Password updated for "${username}".`)
+  }
+
+  async function setTokens(username: string, current: number) {
+    const input = window.prompt(`"${username}" ke liye tokens set karo (100 tokens = 1 scan):`, String(current))
+    if (input === null) return
+    const amount = Number(input)
+    if (!Number.isFinite(amount) || amount < 0) {
+      setError('Valid token amount daalo (0 ya usse zyada)')
+      return
+    }
+    const ok = await call('PATCH', { username, tokens: Math.floor(amount) })
+    if (ok) setNotice(`"${username}" ke tokens ab ${Math.floor(amount)} hain.`)
   }
 
   async function removeUser(username: string) {
@@ -167,8 +180,22 @@ export function UsersDialog({ open, onClose }: { open: boolean; onClose: () => v
                 <p className="font-mono text-[11px] text-muted-foreground">
                   Created {new Date(u.createdAt).toLocaleDateString()}
                 </p>
+                <p className="mt-1 inline-flex items-center gap-1 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 font-mono text-[11px] font-semibold text-warning">
+                  <Coins className="size-3" aria-hidden />
+                  {u.tokens} tokens
+                </p>
               </div>
               <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setTokens(u.username, u.tokens)}
+                  disabled={busy}
+                  title="Set tokens (100 tokens = 1 scan)"
+                  aria-label={`Set tokens for ${u.username}`}
+                  className="btn-press rounded-lg border border-warning/50 bg-card p-2 text-warning hover:bg-warning/10 disabled:opacity-40"
+                >
+                  <Coins className="size-4" aria-hidden />
+                </button>
                 <button
                   type="button"
                   onClick={() => resetPassword(u.username)}
