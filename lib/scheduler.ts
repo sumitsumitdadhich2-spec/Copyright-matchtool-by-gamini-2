@@ -495,6 +495,90 @@ class Scheduler {
     }
   }
 
+  /** COVERAGE CHECK (quota saver): kya is minute ki POORI short timeline
+   *  (seg.start–seg.end) already-mile matches se map ho chuki hai?
+   *  Chhote gaps (< 0.5s) covered maane jaate hain; usse bada ek bhi second
+   *  baki ho to scanning chalti rehti hai. Rejected matches count NAHI hote. */
+  private coverageGaps(scan: Scan, seg: ShortSegmentState): string[] {
+    const TOL = 0.5 // seconds — isse chhota gap "covered" hai
+    const ivs = (scan.matches || [])
+      .filter((m) => m.verified !== false && m.shortEnd > seg.start && m.shortStart < seg.end)
+      .map((m) => [Math.max(seg.start, m.shortStart), Math.min(seg.end, m.shortEnd)] as [number, number])
+      .sort((a, b) => a[0] - b[0])
+    const gaps: string[] = []
+    let cursor = seg.start
+    for (const [s, e] of ivs) {
+      if (s > cursor + TOL) gaps.push(`${ts(cursor)}–${ts(s)}`)
+      cursor = Math.max(cursor, e)
+    }
+    if (cursor < seg.end - TOL) gaps.push(`${ts(cursor)}–${ts(seg.end)}`)
+    return gaps
+  }
+
+  /** EARLY-EXIT (quota saver): jaise hi current minute ki poori timeline map ho
+   *  jaati hai, bache hue QUEUED chunks DROP ho jaate hain — na cut, na upload,
+   *  na API request. In-flight chunks apne aap finish hote hain. Dropped chunks
+   *  ke pre-uploads (pipelining cache) bhi delete ho jaate hain. */
+  private maybeEarlyStopSegment(job: Job) {
+    const seg = job.seg
+    if (!seg || job.stopping || job.queue.length === 0) return
+    const gaps = this.coverageGaps(job.scan, seg)
+    if (gaps.length > 0) return
+    const dropped = [...new Set(job.queue)]
+    job.queue.length = 0
+    let cancelled = 0
+    for (const ci of dropped) {
+      const c = seg.chunks[ci]
+      if (c && c.status === 'pending') {
+        c.status = 'cancelled'
+        cancelled++
+      }
+    }
+    // Dropped chunks ke prefetched uploads: remote file delete + cache clear.
+    for (const lane of job.lanes) {
+      for (const ci of dropped) {
+        const p = lane.chunkUploads.get(ci)
+        if (p) {
+          lane.chunkUploads.delete(ci)
+          p.then((f) => deleteFileQuiet(lane.ai, f.name)).catch(() => {})
+        }
+      }
+    }
+    if (cancelled > 0) {
+      addLog(
+        job.scan,
+        'success',
+        `Coverage complete: minute ${seg.index + 1} ki poori short timeline (${ts(seg.start)}–${ts(seg.end)}) map ho chuki hai — bache ${cancelled} chunk(s) SKIP kiye, quota saved`,
+      )
+    }
+    this.mark(job)
+  }
+
+  /** NEXT-MINUTE PREFETCH: agli selected minute ka short-segment file background
+   *  me cut + har API key par pre-upload — current minute khatam hote hi agla
+   *  minute ZERO upload-wait par shuru hota hai. */
+  private prefetchNextSegmentUpload(job: Job, segments: ShortSegmentState[], current: ShortSegmentState) {
+    if (job.stopping) return
+    const next = segments.find(
+      (s) =>
+        s.index > current.index &&
+        s.selected !== false &&
+        s.status !== 'done' &&
+        s.chunks.some((c) => c.status === 'pending'),
+    )
+    if (!next) return
+    const lanesNeeding = job.lanes.filter((l) => !l.segUris.has(next.index) && !l.segUriPromises.has(next.index))
+    if (lanesNeeding.length === 0) return
+    addLog(
+      job.scan,
+      'info',
+      `Pipeline: next short minute ${next.index + 1} background me pre-upload ho raha hai (${lanesNeeding.length} key(s)) — turn aane par zero wait`,
+    )
+    for (const lane of lanesNeeding) {
+      void this.ensureSegmentUri(job, lane, next).catch(() => {})
+    }
+  }
+
   private async runScan(job: Job) {
     const { scan } = job
     const segments = scan.shortSegments || []
@@ -529,6 +613,15 @@ class Scheduler {
         seg.status = 'scanning'
         job.queue = pending.map((c) => c.index)
         job.chunkPhaseDone = false
+
+        // COVERAGE EARLY-EXIT (resume case): agar is minute ki timeline pehle
+        // se hi poori map ho chuki hai, to queued chunks turant drop ho jaate
+        // hain — ek bhi API request kharch nahi hoti.
+        this.maybeEarlyStopSegment(job)
+
+        // NEXT-MINUTE PREFETCH: agli minute ka short segment abhi se background
+        // me cut + har key par upload hona shuru — turn aane par zero wait.
+        this.prefetchNextSegmentUpload(job, segments, seg)
         if (multi) {
           const r = segMovieRange(scan, seg)
           const rangeNote = r.custom ? ` (movie range ${ts(r.start)}–${ts(r.end)} only — baaki chunks skipped)` : ''
@@ -1257,6 +1350,12 @@ class Scheduler {
           addLog(scan, 'info', `${minutePrefix}Chunk ${chunkIndex}: no segments found in this minute`)
         }
         this.mark(job)
+
+        // COVERAGE EARLY-EXIT (quota saver): is chunk ke result ke baad check —
+        // agar minute ki POORI short timeline ab map ho chuki hai, to bache hue
+        // queued chunks drop ho jaate hain (na upload, na API request).
+        // Agar 1 bhi second ka gap baki hai, scanning waise hi chalti rehti hai.
+        if (matches.length > 0) this.maybeEarlyStopSegment(job)
       } catch (err) {
         const e = err instanceof GeminiError ? err : classifyError(err)
         chunk.attempts += 1
