@@ -1,6 +1,6 @@
 import 'server-only'
 
-import { put, list } from '@vercel/blob'
+import { put, get } from '@vercel/blob'
 import bcrypt from 'bcryptjs'
 import { cookies } from 'next/headers'
 import { SESSION_COOKIE, verifySessionToken, type SessionUser } from './session'
@@ -21,20 +21,11 @@ export interface StoredUser {
   disabled?: boolean
 }
 
-async function findUsersBlobUrl(): Promise<string | null> {
-  const { blobs } = await list({ prefix: USERS_BLOB_PATH })
-  // Latest upload wins (addRandomSuffix false keeps a stable path)
-  const exact = blobs.find((b) => b.pathname === USERS_BLOB_PATH)
-  return exact?.url ?? null
-}
-
 export async function readUsers(): Promise<StoredUser[]> {
   try {
-    const url = await findUsersBlobUrl()
-    if (!url) return []
-    const res = await fetch(url, { cache: 'no-store' })
-    if (!res.ok) return []
-    const data = (await res.json()) as StoredUser[]
+    const result = await get(USERS_BLOB_PATH, { access: 'private' })
+    if (!result || !result.stream) return []
+    const data = (await new Response(result.stream).json()) as StoredUser[]
     return Array.isArray(data) ? data : []
   } catch {
     return []
@@ -43,10 +34,12 @@ export async function readUsers(): Promise<StoredUser[]> {
 
 async function writeUsers(users: StoredUser[]): Promise<void> {
   await put(USERS_BLOB_PATH, JSON.stringify(users, null, 2), {
-    access: 'public',
+    access: 'private',
     addRandomSuffix: false,
     allowOverwrite: true,
     contentType: 'application/json',
+    // No edge caching — user create/update must be readable immediately
+    cacheControlMaxAge: 0,
   })
 }
 
