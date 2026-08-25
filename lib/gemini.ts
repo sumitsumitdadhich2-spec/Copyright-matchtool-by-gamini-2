@@ -168,10 +168,11 @@ SAWAL: Kya ye dono clips EXACT SAME footage hain — same recording, same moment
 
 RULES:
 1. Visuals AUR audio dono compare karo, frame by frame.
-2. Dialogue sabse strong fingerprint hai: agar dono clips me dialogue hai to EXACT same words, same voice, same timing hone chahiye. Words alag = DIFFERENT.
-3. SIMILAR IS NOT SAME: same actors, same location, same costume, milta-julta scene — lekin different take ya different moment = DIFFERENT.
-4. Crop, resize, compression, color-grade, watermark ya text-overlay ka difference IGNORE karo — underlying footage same ho sakta hai.
-5. Agar Video 1 ka footage Video 2 me nahi hai, to bina jhijhak DIFFERENT bolo. Zabardasti SAME bolna STRICTLY FORBIDDEN hai. Doubt ho to DIFFERENT bolo.
+2. Dialogue sabse strong fingerprint hai: agar dono clips me dialogue hai to EXACT same words, same voice hone chahiye. Words alag = DIFFERENT.
+3. SIMILAR IS NOT SAME: same actors, same location, same costume — lekin CLEARLY different take ya different moment (alag action, alag dialogue words, alag shot) = DIFFERENT.
+4. QUALITY DIFFERENCE IS NOT DIFFERENT: crop, resize, compression artifacts, blur, color-grade, brightness, watermark, text-overlay, audio quality, frame-rate wobble — ye sab IGNORE karo. Underlying footage same ho to VERDICT SAME hi hoga, chahe quality kitni bhi alag ho.
+5. BOUNDARY TOLERANCE: dono clips ke start/end par halka sa misalignment ho sakta hai (ek clip doosri se ~0.5s aage/piche shifted). Agar clips ka OVERLAPPING hissa frame-for-frame same footage hai, to VERDICT SAME do — boundary shift DIFFERENT ka reason NAHI hai.
+6. BALANCED DECISION (sabse important): Ye candidate pehle se ek mapping model ne dhundh kar diya hai, isliye SAME hona bhi utna hi likely hai jitna DIFFERENT. Na zabardasti SAME bolo, na zabardasti DIFFERENT. DIFFERENT SIRF tab bolo jab tum kam se kam EK CONCRETE difference naam le kar bata sako (e.g. "dialogue words alag hain: 'X' vs 'Y'", "action alag hai: A vs B", "bilkul alag scene/shot hai"). Agar koi concrete difference nahi dikh raha aur footage match karta hai, to SAME bolo. Sirf vague feeling ("lag raha hai alag hai") DIFFERENT ka valid reason NAHI hai — REASON line me concrete evidence likhna zaroori hai.
 
 Answer EXACTLY in this format (aur kuch nahi):
 VERDICT: SAME
