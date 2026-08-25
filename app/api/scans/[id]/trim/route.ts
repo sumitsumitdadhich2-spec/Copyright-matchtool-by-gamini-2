@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import path from 'node:path'
-import { getScan, saveScan, addLog, scanMediaDir } from '@/lib/store'
+import { getScan, getFreshScan, saveScan, addLog, scanMediaDir } from '@/lib/store'
 import { ensureLocalMedia } from '@/lib/media'
 import { chunkMovie } from '@/lib/ffmpeg'
 import { CHUNK_SECONDS } from '@/lib/models'
@@ -13,7 +13,9 @@ export const maxDuration = 300
  *  ABSOLUTE to the ORIGINAL movie (the scheduler adds the trim offset). */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params
-  const scan = getScan(id)
+  // Cross-instance safe: this request may land on a serverless instance whose
+  // /tmp never saw the scan — getFreshScan() pulls the record from Blob.
+  const scan = await getFreshScan(id)
   if (!scan) return NextResponse.json({ error: 'Scan not found' }, { status: 404 })
   if (!scan.movieDuration) return NextResponse.json({ error: 'Upload a movie first' }, { status: 400 })
   if (scan.status === 'chunking') return NextResponse.json({ error: 'Chunking already in progress' }, { status: 409 })
@@ -63,6 +65,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   // Chunk in the background; the client polls chunkingProgress.
   void (async () => {
     try {
+      // If /tmp was wiped (different instance / cold start) pull the movie
+      // back from Blob before cutting chunks.
+      const localMovie = await ensureLocalMedia(id, 'movie')
+      if (!localMovie) throw new Error('Movie file not available locally or in Blob storage')
       const actual = await chunkMovie(
         dest,
         path.join(mediaDir, 'chunks'),

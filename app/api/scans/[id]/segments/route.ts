@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { getScan, saveScan, addLog } from '@/lib/store'
+import { getFreshScan, saveScan, addLog } from '@/lib/store'
 import { scheduler } from '@/lib/scheduler'
 import { chunkOverlapsSegRange } from '@/lib/segment-range'
 
@@ -10,7 +10,8 @@ export const runtime = 'nodejs'
  *  — results merge into the same scan. */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params
-  const scan = getScan(id)
+  // Cross-instance safe read: pulls the scan from Blob when /tmp is stale.
+  const scan = await getFreshScan(id)
   if (!scan) return NextResponse.json({ error: 'Scan not found' }, { status: 404 })
   if (scheduler.isRunning(id)) {
     return NextResponse.json({ error: 'Cannot change minute selection while a scan is running' }, { status: 409 })

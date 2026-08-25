@@ -19,6 +19,7 @@ import {
 } from './models'
 import {
   getScan,
+  getFreshScan,
   saveScan,
   addLog,
   getModelUsage,
@@ -149,7 +150,9 @@ class Scheduler {
     // every user scans strictly on their own keys.
     const apiKeys = userApiKeys ?? []
     if (apiKeys.length === 0) return { ok: false, error: 'No Gemini API key configured for YOUR account. Add your key in Settings first.' }
-    const scan = getScan(scanId)
+    // Cross-instance safe read: the scan may have been created/updated on a
+    // different serverless instance — pull the fresh record from Blob.
+    const scan = await getFreshScan(scanId)
     if (!scan) return { ok: false, error: 'Scan not found' }
     if (!scan.shortDuration || !scan.movieDuration || scan.chunkCount === 0) {
       return { ok: false, error: 'Both videos must be uploaded and chunked before scanning.' }
@@ -273,7 +276,8 @@ class Scheduler {
     userApiKeys?: string[],
   ): Promise<{ ok: boolean; error?: string }> {
     const job = this.jobs.get(scanId)
-    const scan = job ? job.scan : getScan(scanId)
+    // Live job on this instance = freshest state; otherwise cross-instance safe read from Blob.
+    const scan = job ? job.scan : await getFreshScan(scanId)
     if (!scan) return { ok: false, error: 'Scan not found' }
 
     // RESCAN LOCK: a manual retry NEVER starts while the verification queue has
