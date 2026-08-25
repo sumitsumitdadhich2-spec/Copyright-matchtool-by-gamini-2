@@ -3,6 +3,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import type { Scan, ScanSummary, LogEntry } from './types'
 import { MODEL_POOL } from './models'
+import { backupScanToBlob, deleteScanBlob } from './scan-blob'
 
 // On Vercel the project directory is read-only; only /tmp is writable.
 // Using /tmp there also keeps the data dir out of build output tracing.
@@ -136,6 +137,35 @@ function scanFile(id: string) {
   return path.join(SCANS_DIR, `${id}.json`)
 }
 
+/** Keep at most this many scans (videos). Creating the next one deletes the oldest. */
+export const MAX_SCANS = 4
+
+/**
+ * Deletes the oldest scans (JSON record + local media files + Blob backup)
+ * so at most `keep` scans remain. Called when a new scan is created.
+ */
+export function pruneOldScans(keep: number = MAX_SCANS): string[] {
+  ensureDirs()
+  const all = listScans() // newest first
+  const toDelete = all.slice(keep)
+  const deleted: string[] = []
+  for (const s of toDelete) {
+    try {
+      fs.rmSync(scanFile(s.id), { force: true })
+    } catch {
+      // ignore
+    }
+    try {
+      fs.rmSync(path.join(MEDIA_DIR, s.id), { recursive: true, force: true })
+    } catch {
+      // ignore
+    }
+    void deleteScanBlob(s.id)
+    deleted.push(s.id)
+  }
+  return deleted
+}
+
 export function newScan(): Scan {
   ensureDirs()
   const id = crypto.randomBytes(8).toString('hex')
@@ -191,6 +221,8 @@ export function getScan(id: string): Scan | null {
 export function saveScan(scan: Scan) {
   if (scan.logs.length > 600) scan.logs = scan.logs.slice(-500)
   writeJSON(scanFile(scan.id), scan)
+  // Mirror to Blob storage (throttled, fire-and-forget) so results survive restarts.
+  backupScanToBlob(scan)
 }
 
 export function listScans(): ScanSummary[] {
