@@ -83,13 +83,15 @@ export function Dashboard() {
     <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-4 p-4 md:p-6">
       <header className="alert-in sticky top-3 z-20 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card/80 p-3 shadow-lg backdrop-blur-md md:px-4">
         <div className="flex items-center gap-3">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary/30 to-primary/10 text-primary ring-1 ring-primary/30">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-md shadow-primary/30">
             <ScanSearch className="size-5" aria-hidden />
           </span>
           <div>
-            <h1 className="text-base font-semibold leading-tight tracking-tight md:text-lg">Copyright Match Tool</h1>
-            <p className="hidden text-xs text-muted-foreground sm:block">
-              Gemini-powered clip-in-movie scanner · one prompt per minute · 24 fps
+            <h1 className="text-base font-semibold leading-tight tracking-tight md:text-lg">
+              Copyright Match <span className="text-primary">Tool</span>
+            </h1>
+            <p className="hidden font-mono text-[11px] uppercase tracking-wider text-muted-foreground sm:block">
+              Gemini scanner · 1 prompt/min · 24 fps
             </p>
           </div>
         </div>
