@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { scheduler } from '@/lib/scheduler'
 import { getSession } from '@/lib/users'
 import { getAllUserApiKeys } from '@/lib/user-keys'
+import { deductTokens, refundTokens, SCAN_TOKEN_COST } from '@/lib/tokens'
 
 export const runtime = 'nodejs'
 
@@ -28,7 +29,25 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     )
   }
 
+  // TOKENS: 1 fresh scan = 100 tokens. Resume is free (already paid).
+  // Admin (shiva) has unlimited tokens and never gets charged.
+  let charged = false
+  if (session.role !== 'admin' && !resume) {
+    const newBalance = await deductTokens(session.username, SCAN_TOKEN_COST)
+    if (newBalance === null) {
+      return NextResponse.json(
+        { error: `Tokens khatm ho gaye hain! 1 scan = ${SCAN_TOKEN_COST} tokens. Admin se tokens lo.`, tokensExhausted: true },
+        { status: 402 },
+      )
+    }
+    charged = true
+  }
+
   const result = await scheduler.start(id, resume, userApiKeys)
-  if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 })
+  if (!result.ok) {
+    // Scan didn't start — give the tokens back.
+    if (charged) await refundTokens(session.username, SCAN_TOKEN_COST)
+    return NextResponse.json({ error: result.error }, { status: 400 })
+  }
   return NextResponse.json({ ok: true })
 }
