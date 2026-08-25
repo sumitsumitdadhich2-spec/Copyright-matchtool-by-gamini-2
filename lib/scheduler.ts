@@ -1113,11 +1113,19 @@ class Scheduler {
         // Model timestamps are LOCAL to the 1-minute segment file — shift them by
         // seg.start so every stored match carries ABSOLUTE short-video seconds.
         // Movie offset is TRIM-AWARE: reported movie times stay absolute to the ORIGINAL movie.
-        const matches = parseChunkMatches(raw, chunkIndex, chunkAbsWindow(scan, chunkIndex).start, m.id).map((mm) => ({
-          ...mm,
-          shortStart: mm.shortStart + seg.start,
-          shortEnd: mm.shortEnd + seg.start,
-        }))
+        // ORDERING SAFETY: the segment file is physically at most (seg.end - seg.start)
+        // seconds long, so any local timestamp beyond that is a model hallucination.
+        // Clamp into the segment window (and drop fully-outside matches) so a
+        // minute-2 match can NEVER land at a wrong absolute time and break ordering.
+        const segLocalDur = seg.end - seg.start
+        const matches = parseChunkMatches(raw, chunkIndex, chunkAbsWindow(scan, chunkIndex).start, m.id)
+          .filter((mm) => mm.shortStart < segLocalDur - 0.02 && mm.shortEnd > 0)
+          .map((mm) => ({
+            ...mm,
+            shortStart: seg.start + Math.min(Math.max(0, mm.shortStart), segLocalDur),
+            shortEnd: seg.start + Math.min(Math.max(0, mm.shortEnd), segLocalDur),
+          }))
+          .filter((mm) => mm.shortEnd - mm.shortStart > 0.02)
         chunk.attempts += 1
 
         // FALSE-RESULT DETECTOR: no NOT FOUND anywhere / fixed-offset A-to-Z
