@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { useSWRConfig } from 'swr'
 import { CheckSquare, Copy, ListChecks, Loader2, Play } from 'lucide-react'
 import type { Scan } from '@/lib/types'
@@ -32,6 +32,121 @@ function toHms(sec: number): string {
 interface RangeText {
   start: string
   end: string
+}
+
+/** Mini dual-thumb slider (same style as the movie trim bar) so each minute's
+ *  movie search range can be DRAGGED instead of typed. Slider ↔ text inputs
+ *  stay in sync both ways. */
+function MiniRangeSlider({
+  min,
+  max,
+  start,
+  end,
+  disabled,
+  label,
+  onChange,
+}: {
+  min: number
+  max: number
+  start: number
+  end: number
+  disabled?: boolean
+  label: string
+  onChange: (start: number, end: number) => void
+}) {
+  const barRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef<'start' | 'end' | null>(null)
+  const span = Math.max(1, max - min)
+
+  function posToSeconds(clientX: number): number {
+    const bar = barRef.current
+    if (!bar) return min
+    const rect = bar.getBoundingClientRect()
+    const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
+    return min + frac * span
+  }
+
+  function applyDrag(sec: number, which: 'start' | 'end') {
+    if (which === 'start') {
+      onChange(Math.min(Math.max(min, sec), end - 1), end)
+    } else {
+      onChange(start, Math.max(Math.min(max, sec), start + 1))
+    }
+  }
+
+  function onPointerDown(e: ReactPointerEvent) {
+    if (disabled) return
+    const sec = posToSeconds(e.clientX)
+    const which: 'start' | 'end' = Math.abs(sec - start) <= Math.abs(sec - end) ? 'start' : 'end'
+    dragRef.current = which
+    ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+    applyDrag(sec, which)
+  }
+
+  function onPointerMove(e: ReactPointerEvent) {
+    if (!dragRef.current || disabled) return
+    applyDrag(posToSeconds(e.clientX), dragRef.current)
+  }
+
+  function onPointerUp() {
+    dragRef.current = null
+  }
+
+  const startPct = ((Math.min(Math.max(start, min), max) - min) / span) * 100
+  const endPct = ((Math.min(Math.max(end, min), max) - min) / span) * 100
+
+  return (
+    <div
+      ref={barRef}
+      role="group"
+      aria-label={label}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      className={`relative h-5 touch-none select-none rounded bg-muted ${
+        disabled ? 'opacity-50' : 'cursor-ew-resize'
+      }`}
+    >
+      <div
+        className="absolute inset-y-0 rounded-sm bg-primary/30 ring-1 ring-primary/60"
+        style={{ left: `${startPct}%`, width: `${Math.max(0, endPct - startPct)}%` }}
+        aria-hidden
+      />
+      <div
+        role="slider"
+        aria-label={`${label} — from`}
+        aria-valuemin={min}
+        aria-valuemax={max}
+        aria-valuenow={start}
+        aria-valuetext={toHms(start)}
+        tabIndex={disabled ? -1 : 0}
+        onKeyDown={(e) => {
+          if (disabled) return
+          if (e.key === 'ArrowLeft') applyDrag(start - 5, 'start')
+          if (e.key === 'ArrowRight') applyDrag(start + 5, 'start')
+        }}
+        className="absolute top-1/2 z-10 h-6 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary shadow focus:outline-none focus:ring-2 focus:ring-ring"
+        style={{ left: `${startPct}%` }}
+      />
+      <div
+        role="slider"
+        aria-label={`${label} — to`}
+        aria-valuemin={min}
+        aria-valuemax={max}
+        aria-valuenow={end}
+        aria-valuetext={toHms(end)}
+        tabIndex={disabled ? -1 : 0}
+        onKeyDown={(e) => {
+          if (disabled) return
+          if (e.key === 'ArrowLeft') applyDrag(end - 5, 'end')
+          if (e.key === 'ArrowRight') applyDrag(end + 5, 'end')
+        }}
+        className="absolute top-1/2 z-10 h-6 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary shadow focus:outline-none focus:ring-2 focus:ring-ring"
+        style={{ left: `${endPct}%` }}
+      />
+    </div>
+  )
 }
 
 /** Short-video minute selection: pick exactly which minutes of the SHORT get
@@ -102,6 +217,35 @@ export function MinuteSelectPanel({ scan, running, refresh }: { scan: Scan; runn
 
   function setRange(i: number, field: keyof RangeText, value: string) {
     setRanges((prev) => ({ ...prev, [i]: { ...(prev[i] || { start: '', end: '' }), [field]: value } }))
+  }
+
+  /** Current numeric range for a minute's slider — falls back to the full
+   *  scanned movie window when a text box is empty or invalid. */
+  function numericRange(i: number): { start: number; end: number } {
+    const r = ranges[i] || { start: '', end: '' }
+    const s = r.start.trim() !== '' ? parseTimeInput(r.start) : null
+    const e = r.end.trim() !== '' ? parseTimeInput(r.end) : null
+    let start = s !== null && Number.isFinite(s) ? s : trimStart
+    let end = e !== null && Number.isFinite(e) ? e : trimEnd
+    start = Math.min(Math.max(trimStart, start), trimEnd)
+    end = Math.min(Math.max(trimStart, end), trimEnd)
+    if (end <= start) {
+      start = trimStart
+      end = trimEnd
+    }
+    return { start, end }
+  }
+
+  /** Slider drag → write both text boxes (rounded to whole seconds). Dragging
+   *  to the full window clears the boxes back to "poori movie" mode. */
+  function setRangeFromSlider(i: number, start: number, end: number) {
+    const s = Math.round(start)
+    const e = Math.round(end)
+    const isFull = s <= Math.round(trimStart) && e >= Math.round(trimEnd)
+    setRanges((prev) => ({
+      ...prev,
+      [i]: isFull ? { start: '', end: '' } : { start: toHms(s), end: toHms(e) },
+    }))
   }
 
   /** Copy the first picked minute's range to ALL minutes ("same for all"). */
@@ -201,9 +345,10 @@ export function MinuteSelectPanel({ scan, running, refresh }: { scan: Scan; runn
         )}
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
-        Sirf selected minutes ke chunks par scan chalega — baaki skip ho kar API quota bachega. Har minute ke liye movie
-        ka alag search range (From–To) bhi de sakte ho: us minute ke liye sirf usi range ke chunks scan honge. Khali
-        chhodo = poori movie window. &quot;Same for all&quot; se ek range sab minutes par lag jayegi.
+        Sirf selected minutes ke chunks par scan chalega — baaki skip ho kar API quota bachega. Har minute ke neeche
+        slider kheench kar movie ka search range (From–To) select karo — bilkul waise hi jaise movie upload ke baad trim
+        hota hai. Chaaho to exact time type bhi kar sakte ho. Poora slider = poori movie window. &quot;Same for
+        all&quot; se ek range sab minutes par lag jayegi.
       </p>
 
       <div className="mt-3 grid grid-cols-1 gap-1.5 sm:grid-cols-2 md:grid-cols-3" role="group" aria-label="Minute selection with movie ranges">
@@ -243,8 +388,27 @@ export function MinuteSelectPanel({ scan, running, refresh }: { scan: Scan; runn
                 )}
               </label>
 
-              <div className="mt-2 flex items-center gap-1.5">
-                <span className={`text-[10px] ${hasRange ? 'text-primary' : 'text-muted-foreground'}`}>Movie:</span>
+              <div className="mt-2 flex flex-col gap-1">
+                <div className="flex items-center justify-between">
+                  <span className={`text-[10px] ${hasRange ? 'text-primary' : 'text-muted-foreground'}`}>
+                    Movie range {hasRange ? '' : '(poori movie)'}
+                  </span>
+                  <span className="font-mono text-[10px] text-muted-foreground">
+                    {toHms(numericRange(seg.index).start)}–{toHms(numericRange(seg.index).end)}
+                  </span>
+                </div>
+                <MiniRangeSlider
+                  min={trimStart}
+                  max={trimEnd}
+                  start={numericRange(seg.index).start}
+                  end={numericRange(seg.index).end}
+                  disabled={running || busy}
+                  label={`Minute ${seg.index + 1} movie search range`}
+                  onChange={(s, e) => setRangeFromSlider(seg.index, s, e)}
+                />
+              </div>
+
+              <div className="mt-1.5 flex items-center gap-1.5">
                 <input
                   type="text"
                   inputMode="numeric"
