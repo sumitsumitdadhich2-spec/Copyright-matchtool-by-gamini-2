@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { FFMPEG_BIN, parseFfmpegProgress, probeDuration, probeHasAudio } from './ffmpeg'
+import { getFfmpegBin, parseFfmpegProgress, probeDuration, probeHasAudio } from './ffmpeg'
 import { getScan, saveScan, scanMediaDir, addLog } from './store'
 import type { RenderJob, RenderResolution, RenderSettings, Scan } from './types'
 import { buildRenderSegments, totalStitchedSeconds } from './render-segments'
@@ -155,7 +155,8 @@ export async function startRender(scanId: string, settings: RenderSettings): Pro
     outFile,
   )
 
-  const child = spawn(FFMPEG_BIN, args)
+  const ffmpegBin = await getFfmpegBin()
+  const child = spawn(ffmpegBin, args)
   const active: ActiveRender = { child, cancelled: false }
   activeRenders.set(scanId, active)
 
