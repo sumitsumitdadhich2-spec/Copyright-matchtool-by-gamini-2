@@ -93,6 +93,33 @@ export async function getAllUserApiKeys(username: string): Promise<string[]> {
   return out
 }
 
+// ---------------------------------------------------------------------------
+// TWELVE LABS API key (optional pre-filter) — stored in the SAME per-user
+// file under a reserved non-numeric slot so it never collides with Gemini
+// slots 1-20. Missing key = pre-filter off, app runs exactly as before.
+// ---------------------------------------------------------------------------
+
+const TL_SLOT = 'twelvelabs'
+
+/** Read this user's Twelve Labs API key (null = pre-filter disabled). */
+export async function getUserTwelveLabsKey(username: string): Promise<string | null> {
+  const keys = await readUserKeys(username)
+  return keys[TL_SLOT] || null
+}
+
+/** Save this user's Twelve Labs API key. */
+export async function setUserTwelveLabsKey(username: string, key: string): Promise<void> {
+  const keys = await readUserKeys(username)
+  await writeUserKeys(username, { ...keys, [TL_SLOT]: key })
+}
+
+/** Remove this user's Twelve Labs API key. */
+export async function clearUserTwelveLabsKey(username: string): Promise<void> {
+  const keys = { ...(await readUserKeys(username)) }
+  delete keys[TL_SLOT]
+  await writeUserKeys(username, keys)
+}
+
 /** Delete a user's entire key file (used when the account is deleted). */
 export async function deleteUserKeys(username: string): Promise<void> {
   try {

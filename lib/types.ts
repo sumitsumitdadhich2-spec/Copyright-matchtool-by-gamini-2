@@ -61,6 +61,10 @@ export interface ShortSegmentState {
    *  Unset = search the whole trim window. */
   movieRangeStart?: number
   movieRangeEnd?: number
+  /** TWELVE LABS PRE-FILTER (optional): chunk indexes selected by embedding
+   *  similarity for THIS minute (already includes ±1 buffer chunks).
+   *  Unset = no pre-filter — scan every chunk (normal full scan). */
+  prefilterChunks?: number[]
 }
 
 // ---------- Render / Export ----------
@@ -164,6 +168,37 @@ export interface CandidateGroup {
   attempts: number
 }
 
+// ---------- Twelve Labs pre-filter (optional) ----------
+
+export type TwelveLabsIndexStatus = 'none' | 'indexing' | 'ready' | 'error'
+
+/** Movie indexing state on Twelve Labs (Marengo embeddings). Fully optional —
+ *  when absent, the app behaves exactly as before (normal full scan). */
+export interface TwelveLabsState {
+  status: TwelveLabsIndexStatus
+  indexId?: string
+  taskId?: string
+  videoId?: string
+  /** number of 6-second segment embeddings saved locally */
+  segmentCount?: number
+  indexedAt?: number
+  /** human-readable indexing progress note */
+  progress?: string
+  error?: string | null
+}
+
+/** Result of the pre-filter decision for the LAST scan run. */
+export interface PrefilterInfo {
+  /** 'prefiltered' = Twelve Labs selected the chunks; 'full' = normal full scan */
+  mode: 'prefiltered' | 'full'
+  /** chunks sent to Gemini (pending ones) vs total chunk count */
+  selectedChunks: number
+  totalChunks: number
+  /** why the scan fell back to full (only when mode = 'full' and TL was attempted) */
+  reason?: string
+  at: number
+}
+
 export interface ModelLiveState {
   state: 'idle' | 'active' | 'cooling' | 'exhausted' | 'waiting'
   currentChunk: number | null
@@ -183,6 +218,10 @@ export interface ScanReport {
   groupsConfirmed?: number
   groupsRejected?: number
   groupsUnverified?: number
+  /** how the chunk set was chosen: 'twelvelabs' pre-filter or normal 'full' scan */
+  prefilterMode?: 'twelvelabs' | 'full'
+  prefilterSelected?: number
+  prefilterTotal?: number
 }
 
 export interface Scan {
@@ -220,6 +259,10 @@ export interface Scan {
   matches: ChunkMatch[]
   /** Candidate + verifier pipeline: one group per claimed short segment */
   candidateGroups?: CandidateGroup[]
+  /** OPTIONAL Twelve Labs pre-filter: movie indexing state (absent = feature unused) */
+  twelveLabs?: TwelveLabsState
+  /** pre-filter decision of the LAST scan run (for the UI) */
+  prefilter?: PrefilterInfo
   logs: LogEntry[]
   startedAt: number | null
   finishedAt: number | null

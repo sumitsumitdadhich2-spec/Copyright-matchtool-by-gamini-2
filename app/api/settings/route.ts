@@ -1,6 +1,13 @@
 import { NextResponse } from 'next/server'
 import { getAllUsage, MAX_API_KEYS } from '@/lib/store'
-import { getUserKeyN, setUserKeyN, clearUserKeyN } from '@/lib/user-keys'
+import {
+  getUserKeyN,
+  setUserKeyN,
+  clearUserKeyN,
+  getUserTwelveLabsKey,
+  setUserTwelveLabsKey,
+  clearUserTwelveLabsKey,
+} from '@/lib/user-keys'
 import { getSession } from '@/lib/users'
 import { MODEL_POOL } from '@/lib/models'
 
@@ -20,9 +27,12 @@ export async function GET() {
     keys.push({ index: n, hasKey: Boolean(k), maskedKey: k ? mask(k) : null })
   }
   const key1 = await getUserKeyN(session.username, 1)
+  const tlKey = await getUserTwelveLabsKey(session.username)
   return NextResponse.json({
     keys,
     maxKeys: MAX_API_KEYS,
+    // OPTIONAL Twelve Labs pre-filter key (missing = feature off, app unchanged)
+    twelveLabs: { hasKey: Boolean(tlKey), maskedKey: tlKey ? mask(tlKey) : null },
     // legacy fields kept for older clients
     hasKey: keys[0].hasKey,
     maskedKey: keys[0].maskedKey,
@@ -39,6 +49,20 @@ export async function POST(req: Request) {
   const username = session.username
 
   const body = (await req.json()) as Record<string, unknown>
+
+  // ----- Twelve Labs key (optional pre-filter): { twelveLabsKey } / { clearTwelveLabs: true } -----
+  if (body.clearTwelveLabs === true) {
+    await clearUserTwelveLabsKey(username)
+    return NextResponse.json({ ok: true })
+  }
+  if (typeof body.twelveLabsKey === 'string') {
+    const key = body.twelveLabsKey.trim()
+    if (key.length < 10) {
+      return NextResponse.json({ error: 'Invalid Twelve Labs API key' }, { status: 400 })
+    }
+    await setUserTwelveLabsKey(username, key)
+    return NextResponse.json({ ok: true })
+  }
 
   // ----- Clear a key slot: { clear: n } -----
   if (typeof body.clear === 'number') {
