@@ -14,6 +14,7 @@ interface KeySlot {
 interface SettingsResponse {
   keys: KeySlot[]
   maxKeys: number
+  twelveLabs?: { hasKey: boolean; maskedKey: string | null }
 }
 
 const MAX_SLOTS = 20
@@ -29,6 +30,48 @@ export function ApiKeyPanel() {
   const [saved, setSaved] = useState<number | null>(null)
   const [removing, setRemoving] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [tlValue, setTlValue] = useState('')
+  const [tlSaving, setTlSaving] = useState(false)
+  const [tlSaved, setTlSaved] = useState(false)
+
+  async function saveTl() {
+    const v = tlValue.trim()
+    if (!v) return
+    setTlSaving(true)
+    setError(null)
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ twelveLabsKey: v }),
+    })
+    setTlSaving(false)
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}))
+      setError(j.error || 'Failed to save Twelve Labs key')
+      return
+    }
+    setTlValue('')
+    setTlSaved(true)
+    setTimeout(() => setTlSaved(false), 2500)
+    void mutate()
+  }
+
+  async function removeTl() {
+    setTlSaving(true)
+    setError(null)
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clearTwelveLabs: true }),
+    })
+    setTlSaving(false)
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}))
+      setError(j.error || 'Failed to remove Twelve Labs key')
+      return
+    }
+    void mutate()
+  }
 
   const slots: KeySlot[] =
     data?.keys ?? Array.from({ length: MAX_SLOTS }, (_, i) => ({ index: i + 1, hasKey: false, maskedKey: null }))
@@ -135,6 +178,59 @@ export function ApiKeyPanel() {
           </div>
         )
       })}
+
+      {/* ---------- Twelve Labs (OPTIONAL pre-filter) ---------- */}
+      <div className="mt-4 border-t border-border pt-4">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="size-4 text-primary" aria-hidden />
+          <h2 className="text-sm font-semibold">Twelve Labs API Key — Pre-Filter (optional)</h2>
+          {data?.twelveLabs?.hasKey ? (
+            <span className="ml-auto flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 font-mono text-xs text-success">
+              <Check className="size-3" aria-hidden />
+              {data.twelveLabs.maskedKey}
+            </span>
+          ) : (
+            <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 text-xs text-muted-foreground">not set</span>
+          )}
+        </div>
+        <div className="mt-3 flex gap-2">
+          <input
+            type="password"
+            value={tlValue}
+            onChange={(e) => setTlValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) saveTl()
+            }}
+            placeholder={data?.twelveLabs?.hasKey ? 'Paste a new key to replace' : 'Paste your Twelve Labs API key (optional)'}
+            aria-label="Twelve Labs API key"
+            className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
+          />
+          <button
+            type="button"
+            onClick={() => saveTl()}
+            disabled={tlSaving || !tlValue.trim()}
+            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40"
+          >
+            {tlSaving ? 'Saving...' : tlSaved ? 'Saved' : data?.twelveLabs?.hasKey ? 'Update' : 'Save'}
+          </button>
+          {data?.twelveLabs?.hasKey && (
+            <button
+              type="button"
+              onClick={() => removeTl()}
+              disabled={tlSaving}
+              aria-label="Remove Twelve Labs API key"
+              title="Remove this key"
+              className="rounded-md border border-border px-2.5 py-2 text-sm text-muted-foreground hover:text-destructive disabled:opacity-40"
+            >
+              <X className="size-4" aria-hidden />
+            </button>
+          )}
+        </div>
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          Optional embedding pre-filter — jab set hai to scan se pehle Twelve Labs sirf matching movie chunks select
+          karta hai (Gemini quota saver). Khali chhodo to app bilkul normal full-scan mode me chalega, koi asar nahi.
+        </p>
+      </div>
 
       <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
         Add 1 to 20 keys — the scan works with ANY number. All keys scan chunks in parallel first, then all keys run 24fps
