@@ -15,10 +15,12 @@ const require = createRequire(import.meta.url)
 const API_KEY = process.env.TWELVELABS_API_KEY || 'tlk_2WYPVHQ2QSPJFD26TPZSA1S0C5Z4'
 const BASE = 'https://api.twelvelabs.io/v1.3'
 
-const MEDIA = '/vercel/share/v0-project/data/media/e5a38f83f4a96f3e'
-const SHORT_SRC = `${MEDIA}/short.mp4`
-const CHUNK_SRC = `${MEDIA}/segments/seg-0000.mp4`
-const SHORT_60 = '/tmp/tl-short-60s.mp4'
+const MEDIA = '/vercel/share/v0-project/data/media/6ce3202a6a652efc'
+// segments/seg-0000.mp4 = SHORT ka pehla 1-minute segment (app ne pehle hi kaata hua, 24fps)
+const SHORT_60 = `${MEDIA}/segments/seg-0000.mp4`
+const MOVIE_SRC = `${MEDIA}/movie.mp4`
+// Movie chunk 0 (00:00 - 01:00) — app ke SAME ffmpeg settings se /tmp me cut hoga
+const CHUNK_SRC = '/tmp/tl-movie-chunk-0000.mp4'
 
 // App ka chunk-map prompt, Twelve Labs (single-video Pegasus) ke liye adapt kiya —
 // HISSA 1 wala time-map style, dialogue verbatim quote rule same rakha hai.
@@ -65,13 +67,27 @@ function fileForm(fields, filePath, fileField) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function main() {
-  // ---- 0. Short ka pehla 60s trim karo ----
-  if (!existsSync(SHORT_60)) {
+  // ---- 0. Movie ka chunk 0 (00:00 - 01:00) cut karo — app ke same encode settings ----
+  if (!existsSync(CHUNK_SRC)) {
     const ffmpeg = require('ffmpeg-static')
-    log('Trimming short.mp4 -> first 60s ...')
-    execFileSync(ffmpeg, ['-y', '-i', SHORT_SRC, '-t', '60', '-c', 'copy', SHORT_60], { stdio: 'pipe' })
+    log('Cutting movie.mp4 -> chunk 0 (first 60s, 640px/24fps/crf28 — app jaisa) ...')
+    execFileSync(
+      ffmpeg,
+      [
+        '-y', '-i', MOVIE_SRC, '-t', '60',
+        '-vf', 'scale=640:-2,fps=24',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+        '-c:a', 'aac', '-b:a', '64k', '-ac', '1',
+        CHUNK_SRC,
+      ],
+      { stdio: 'pipe' },
+    )
   }
   log('Videos ready:', SHORT_60, '+', CHUNK_SRC)
+
+  console.log('\n========= PROMPT JO TWELVE LABS (PEGASUS) KO BHEJA JA RAHA HAI =========\n')
+  console.log(TIME_MAP_PROMPT)
+  console.log('\n=========================================================================\n')
 
   // ---- 1. Index banao (Marengo = matching/embeddings, Pegasus = text analysis) ----
   log('Creating index ...')
@@ -80,9 +96,10 @@ async function main() {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       index_name: `copyright-test-${Date.now()}`,
+      // NOTE: is API key/plan par sirf marengo3.0 allowed hai (Pegasus available nahi —
+      // HTTP 400 "You should use one of the following values: marengo3.0")
       models: [
         { model_name: 'marengo3.0', model_options: ['visual', 'audio'] },
-        { model_name: 'pegasus1.5', model_options: ['visual', 'audio'] },
       ],
     }),
   })
