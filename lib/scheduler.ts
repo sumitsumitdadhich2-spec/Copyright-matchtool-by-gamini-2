@@ -29,6 +29,15 @@ import {
 import { chunkPath, cleanupChunks, cleanupClips, extractClipPrecise, extractSegment, segmentPath } from './ffmpeg'
 import { chunkOverlapsSegRange, segMovieRange } from './segment-range'
 import {
+  ensureIndex,
+  createIndexTask,
+  pollTaskUntilReady,
+  fetchVideoEmbeddings,
+  loadEmbeddings,
+  saveEmbeddings,
+  computePrefilterChunks,
+} from './twelvelabs'
+import {
   getClient,
   uploadVideo,
   deleteFileQuiet,
@@ -67,6 +76,8 @@ interface KeyLane {
 interface Job {
   scan: Scan
   lanes: KeyLane[]
+  /** OPTIONAL Twelve Labs key — enables the embedding pre-filter. null = normal full scan. */
+  tlKey: string | null
   /** the short segment (minute) currently being scanned — workers read this */
   seg: ShortSegmentState | null
   /** chunk queue (indexes) for the CURRENT segment */
@@ -146,7 +157,12 @@ class Scheduler {
     if (scan.currentShortSegment === undefined) scan.currentShortSegment = 0
   }
 
-  async start(scanId: string, resume: boolean, userApiKeys?: string[]): Promise<{ ok: boolean; error?: string }> {
+  async start(
+    scanId: string,
+    resume: boolean,
+    userApiKeys?: string[],
+    tlApiKey?: string | null,
+  ): Promise<{ ok: boolean; error?: string }> {
     if (this.jobs.has(scanId)) return { ok: false, error: 'Scan already running' }
     // PER-USER KEYS ONLY: the route passes the logged-in user's own keys
     // (from their private Blob file). There is NO shared/global fallback —
@@ -167,16 +183,25 @@ class Scheduler {
     // PER-MINUTE MOVIE RANGE: chunks outside a minute's chosen movie range are
     // marked cancelled (skipped) so only in-range chunks consume API quota.
     for (const seg of segments) {
+      // TWELVE LABS PRE-FILTER: the persisted per-minute chunk selection is only
+      // honoured while the user's TL key is set. No key = feature fully off —
+      // clear the selection so EVERYTHING scans (normal full scan, zero impact).
+      if (!tlApiKey && Array.isArray(seg.prefilterChunks)) delete seg.prefilterChunks
       for (const c of seg.chunks) {
         const inRange = chunkOverlapsSegRange(scan, seg, c.index)
         if (c.status === 'scanning') c.status = 'pending'
-        // 'cancelled' is ONLY ever set by this range-skip logic, so ALWAYS
-        // revive cancelled chunks that fall inside the CURRENT range — on
+        // 'cancelled' is ONLY ever set by skip logic (range or pre-filter), so
+        // ALWAYS revive cancelled chunks that fall inside the CURRENT range — on
         // fresh starts too, not just Resume. Otherwise changing a minute's
         // movie range after a run leaves the newly chosen part permanently
         // skipped (it was cancelled under the OLD range and never re-queued).
         if (c.status === 'cancelled' && inRange) c.status = 'pending'
         if (c.status === 'pending' && !inRange) c.status = 'cancelled'
+        // Re-apply the persisted pre-filter selection (resume path). A fresh
+        // pre-filter run inside runScan() recomputes/overrides this anyway.
+        if (c.status === 'pending' && Array.isArray(seg.prefilterChunks) && !seg.prefilterChunks.includes(c.index)) {
+          c.status = 'cancelled'
+        }
       }
       if (seg.status === 'scanning' || seg.status === 'verifying') seg.status = 'pending'
       if (seg.status === 'done' && seg.chunks.some((c) => c.status === 'pending')) seg.status = 'pending'
@@ -228,6 +253,7 @@ class Scheduler {
     const job: Job = {
       scan,
       lanes,
+      tlKey: tlApiKey || null,
       seg: null,
       queue: [],
       inFlight: new Set(),
@@ -500,10 +526,127 @@ class Scheduler {
     }
   }
 
+  // ---------- Twelve Labs pre-filter (optional, accuracy-first) ----------
+
+  /** OPTIONAL embedding pre-filter. Runs ONLY when the user's Twelve Labs key
+   *  is set AND the movie's segment embeddings were saved at index time.
+   *  Decides WHICH movie chunks each short minute is scanned against — the
+   *  Gemini pipeline itself (prompts, chunk cutting, models, verification) is
+   *  completely untouched. ANY error here = silent fallback to a normal full
+   *  scan; the scan NEVER fails because of Twelve Labs. */
+  private async applyTwelveLabsPrefilter(job: Job) {
+    const { scan } = job
+    const allSegs = scan.shortSegments || []
+    const selectedSegs = allSegs.filter((s) => s.selected !== false)
+    const countPending = () =>
+      selectedSegs.reduce((n, s) => n + s.chunks.filter((c) => c.status === 'pending').length, 0)
+
+    /** Fall back to the normal FULL scan: drop every pre-filter selection and
+     *  revive pre-filter-cancelled chunks (range-skipped chunks stay skipped). */
+    const fullScan = (reason: string, attempted: boolean) => {
+      for (const seg of allSegs) {
+        if (Array.isArray(seg.prefilterChunks)) delete seg.prefilterChunks
+        for (const c of seg.chunks) {
+          if (c.status === 'cancelled' && chunkOverlapsSegRange(scan, seg, c.index)) c.status = 'pending'
+        }
+        if (seg.status === 'done' && seg.chunks.some((c) => c.status === 'pending')) seg.status = 'pending'
+      }
+      const total = countPending()
+      scan.prefilter = { mode: 'full', selectedChunks: total, totalChunks: total, reason, at: Date.now() }
+      if (attempted) addLog(scan, 'warn', `Twelve Labs pre-filter skipped (${reason}) — normal FULL scan chal raha hai (accuracy 100% safe)`)
+      this.mark(job)
+    }
+
+    if (!job.tlKey) {
+      // No key = feature off. Don't even set scan.prefilter noise beyond mode.
+      fullScan('Twelve Labs key not set', false)
+      return
+    }
+
+    try {
+      // 1) Movie embeddings MUST already be saved (one-time indexing via the button).
+      const movieEmb = await loadEmbeddings(scan.id, 'movie')
+      if (!movieEmb) {
+        fullScan('movie Twelve Labs par indexed nahi hai', true)
+        return
+      }
+
+      // 2) Short embeddings: reuse the cached copy, else upload + poll + save once.
+      let shortEmb = await loadEmbeddings(scan.id, 'short')
+      if (!shortEmb) {
+        const shortFile = path.join(scanMediaDir(scan.id), 'short.mp4')
+        if (!fs.existsSync(shortFile)) {
+          fullScan('short video file missing locally', true)
+          return
+        }
+        addLog(scan, 'info', 'Twelve Labs pre-filter: short video upload + indexing (embeddings ke liye)...')
+        this.mark(job)
+        const indexId = movieEmb.indexId || (await ensureIndex(job.tlKey))
+        const { taskId } = await createIndexTask(job.tlKey, indexId, shortFile)
+        const videoId = await pollTaskUntilReady(job.tlKey, taskId, { intervalMs: 5000, timeoutMs: 30 * 60_000 })
+        const segs = await fetchVideoEmbeddings(job.tlKey, indexId, videoId)
+        shortEmb = { indexId, videoId, savedAt: Date.now(), segments: segs }
+        await saveEmbeddings(scan.id, 'short', shortEmb)
+        addLog(scan, 'success', `Twelve Labs pre-filter: short ke ${segs.length} segment embedding(s) ready (cached for resume)`)
+      }
+
+      // 3) Cosine-similarity matching (threshold 0.75, ±1 buffer chunks).
+      const result = computePrefilterChunks(scan, selectedSegs, shortEmb.segments, movieEmb.segments)
+      if (!result.perSegment) {
+        // ACCURACY RULE: some short segment matched nowhere — never trust the
+        // pre-filter in that case. Full scan.
+        fullScan(result.reason || 'low-confidence pre-filter', true)
+        return
+      }
+
+      // 4) Apply the selection: revive selected chunks, cancel unselected pending
+      //    ones. Range-skipped chunks stay skipped (existing quota-saver logic).
+      const totalBefore = selectedSegs.reduce(
+        (n, s) => n + s.chunks.filter((c) => c.status === 'pending' || c.status === 'cancelled').length,
+        0,
+      )
+      for (const seg of selectedSegs) {
+        const set = result.perSegment.get(seg.index) ?? new Set<number>()
+        seg.prefilterChunks = [...set].sort((a, b) => a - b)
+        for (const c of seg.chunks) {
+          const inRange = chunkOverlapsSegRange(scan, seg, c.index)
+          if (c.status === 'cancelled' && set.has(c.index) && inRange) c.status = 'pending'
+          if (c.status === 'pending' && !set.has(c.index)) c.status = 'cancelled'
+        }
+        if (seg.status === 'done' && seg.chunks.some((c) => c.status === 'pending')) seg.status = 'pending'
+      }
+      const selected = countPending()
+      scan.prefilter = {
+        mode: 'prefiltered',
+        selectedChunks: selected,
+        totalChunks: Math.max(totalBefore, selected),
+        at: Date.now(),
+      }
+      addLog(
+        scan,
+        'success',
+        `Twelve Labs pre-filter: ${selected} of ${Math.max(totalBefore, selected)} chunks selected (threshold 0.75, ±1 buffer chunks) — sirf yehi chunks Gemini ko jayenge`,
+      )
+      this.mark(job)
+    } catch (err) {
+      // ANY Twelve Labs failure = silent fallback. The scan itself never fails.
+      fullScan(err instanceof Error ? err.message.slice(0, 160) : String(err), true)
+    }
+  }
+
   private async runScan(job: Job) {
     const { scan } = job
     const segments = scan.shortSegments || []
     const multi = segments.length > 1
+
+    // OPTIONAL Twelve Labs pre-filter: decides which chunks to scan. Errors
+    // here can never fail the scan — worst case is a normal full scan.
+    await this.applyTwelveLabsPrefilter(job)
+    if (job.stopping) {
+      scan.status = 'stopped'
+      this.finish(job)
+      return
+    }
 
     // Reset transient verify states from an interrupted run + queue any groups
     // still pending from a previous session (verification-only resume).
@@ -652,8 +795,16 @@ class Scheduler {
       groupsConfirmed: groups.filter((g) => g.status === 'confirmed').length,
       groupsRejected: groups.filter((g) => g.status === 'rejected').length,
       groupsUnverified: groups.filter((g) => g.status === 'unverified').length,
+      // How the chunk set was chosen for THIS run (results themselves are 100% Gemini).
+      prefilterMode: scan.prefilter?.mode === 'prefiltered' ? 'twelvelabs' : 'full',
+      prefilterSelected: scan.prefilter?.selectedChunks,
+      prefilterTotal: scan.prefilter?.totalChunks,
     }
-    addLog(scan, 'success', `Scan complete: ${scan.matches.length} matched segment(s)${multi ? ` across ${segments.length} short minute(s)` : ''}`)
+    addLog(
+      scan,
+      'success',
+      `Scan complete: ${scan.matches.length} matched segment(s)${multi ? ` across ${segments.length} short minute(s)` : ''} — ${scan.prefilter?.mode === 'prefiltered' ? 'Twelve Labs pre-filtered scan' : 'Full scan'}`,
+    )
     cleanupChunks(path.join(scanMediaDir(scan.id), 'chunks'))
     cleanupClips(path.join(scanMediaDir(scan.id), 'clips'))
     addLog(scan, 'info', 'Temporary chunk files cleaned up')
