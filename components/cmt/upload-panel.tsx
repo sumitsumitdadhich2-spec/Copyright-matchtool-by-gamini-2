@@ -61,7 +61,7 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
         // No Blob round-trip — upload and processing start instantly.
         await new Promise<void>((resolve, reject) => {
           const xhr = new XMLHttpRequest()
-          xhr.open('POST', `/api/scans/${id}/upload?kind=${kind}&name=${encodeURIComponent(file.name)}`)
+          xhr.open('POST', `/api/scans/${id}/upload?kind=${kind}&name=${encodeURIComponent(file.name)}&size=${file.size}`)
           xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
           xhr.upload.onprogress = (e) => {
             if (e.lengthComputable) {

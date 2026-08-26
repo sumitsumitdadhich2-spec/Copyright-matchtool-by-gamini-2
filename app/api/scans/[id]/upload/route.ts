@@ -53,6 +53,28 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return NextResponse.json({ error: 'Upload failed while saving the file. Please try again.' }, { status: 500 })
   }
 
+  // Verify the WHOLE file arrived — a truncated MP4 is missing its index
+  // (moov atom) and is unreadable, which used to surface as a confusing
+  // "is it a valid video?" error even though the file was fine.
+  const expectedSize = Number.parseInt(url.searchParams.get('size') || '', 10)
+  if (Number.isFinite(expectedSize) && expectedSize > 0) {
+    const gotSize = fs.statSync(dest).size
+    if (gotSize !== expectedSize) {
+      try {
+        fs.unlinkSync(dest)
+      } catch {
+        // ignore cleanup failure
+      }
+      console.error(`[upload] incomplete upload: expected ${expectedSize} bytes, got ${gotSize}`)
+      return NextResponse.json(
+        {
+          error: `Upload incomplete — received ${gotSize.toLocaleString()} of ${expectedSize.toLocaleString()} bytes. Check your connection and try again.`,
+        },
+        { status: 400 },
+      )
+    }
+  }
+
   // Probe with ffmpeg and set up segments / trim state right away.
   const result = await finalizeUploadedMedia(scan, kind, name)
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 })
