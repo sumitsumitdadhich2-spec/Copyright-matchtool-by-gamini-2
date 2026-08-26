@@ -170,7 +170,12 @@ class Scheduler {
       for (const c of seg.chunks) {
         const inRange = chunkOverlapsSegRange(scan, seg, c.index)
         if (c.status === 'scanning') c.status = 'pending'
-        if (resume && c.status === 'cancelled' && inRange) c.status = 'pending'
+        // 'cancelled' is ONLY ever set by this range-skip logic, so ALWAYS
+        // revive cancelled chunks that fall inside the CURRENT range — on
+        // fresh starts too, not just Resume. Otherwise changing a minute's
+        // movie range after a run leaves the newly chosen part permanently
+        // skipped (it was cancelled under the OLD range and never re-queued).
+        if (c.status === 'cancelled' && inRange) c.status = 'pending'
         if (c.status === 'pending' && !inRange) c.status = 'cancelled'
       }
       if (seg.status === 'scanning' || seg.status === 'verifying') seg.status = 'pending'

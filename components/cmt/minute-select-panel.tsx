@@ -484,6 +484,13 @@ export function MinuteSelectPanel({ scan, running, refresh }: { scan: Scan; runn
         )}
       </div>
 
+      {dirty && !running && !busy && (
+        <p role="alert" className="mt-2 rounded-md border border-warning/50 bg-warning/10 px-2.5 py-1.5 text-xs font-medium text-warning">
+          Changes abhi SAVE nahi hue — scan start karne se pehle &quot;Apply selection&quot; zaroor dabao, warna scan
+          purani setting (ya poori movie) par chalega.
+        </p>
+      )}
+
       {error && (
         <p role="alert" className="mt-2 text-xs text-destructive">
           {error}
