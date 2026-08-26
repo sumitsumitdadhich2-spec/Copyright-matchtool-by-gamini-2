@@ -1,7 +1,5 @@
 import { NextResponse } from 'next/server'
 import fs from 'node:fs'
-import { Readable } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
 import { getScan, SCANS_DIR } from '@/lib/store'
 import { restoreScansFromBlob } from '@/lib/scan-blob'
 import { finalizeUploadedMedia, localMediaPath } from '@/lib/media'
@@ -10,12 +8,17 @@ export const runtime = 'nodejs'
 export const maxDuration = 300
 
 /**
- * DIRECT upload: the browser streams the raw video body straight to this
- * route, which writes it to local disk. No Blob round-trip — ffmpeg starts
- * on the local file immediately, so upload + processing are as fast as the
- * network/disk allow.
+ * CHUNKED upload: the browser slices the video into small pieces (~4 MB) and
+ * sends them sequentially. Small request bodies pass through proxies and
+ * serverless body-size limits that silently truncate a single giant POST.
  *
- * Query params: ?kind=short|movie&name=<original filename>
+ * Each chunk carries its byte offset; the server appends it to a .part file
+ * and, once the final byte arrives, renames it into place and runs ffmpeg.
+ * Retried chunks (same offset) are detected and skipped, so the client can
+ * safely retry on network errors.
+ *
+ * Query params:
+ *   ?kind=short|movie & name=<filename> & offset=<byte offset> & total=<file size>
  */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params
@@ -33,51 +36,84 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   if (kind !== 'short' && kind !== 'movie') {
     return NextResponse.json({ error: 'kind must be short or movie' }, { status: 400 })
   }
-  if (!req.body) {
-    return NextResponse.json({ error: 'Empty upload body' }, { status: 400 })
+
+  const offset = Number.parseInt(url.searchParams.get('offset') || '', 10)
+  const total = Number.parseInt(url.searchParams.get('total') || '', 10)
+  if (!Number.isFinite(offset) || offset < 0 || !Number.isFinite(total) || total <= 0 || offset >= total) {
+    return NextResponse.json({ error: 'Invalid offset/total' }, { status: 400 })
   }
 
-  // Stream the request body straight to disk (no memory buffering).
-  const dest = localMediaPath(id, kind)
-  const tmp = `${dest}.up-${process.pid}`
+  let chunk: Buffer
   try {
-    await pipeline(Readable.fromWeb(req.body as never), fs.createWriteStream(tmp))
-    fs.renameSync(tmp, dest)
+    chunk = Buffer.from(await req.arrayBuffer())
   } catch (err) {
+    console.error('[upload] failed to read chunk body:', err instanceof Error ? err.message : err)
+    return NextResponse.json({ error: 'Failed to read upload chunk. Please retry.' }, { status: 400 })
+  }
+  if (chunk.length === 0) {
+    return NextResponse.json({ error: 'Empty upload chunk' }, { status: 400 })
+  }
+  if (offset + chunk.length > total) {
+    return NextResponse.json({ error: 'Chunk extends past declared file size' }, { status: 400 })
+  }
+
+  const dest = localMediaPath(id, kind)
+  const part = `${dest}.part`
+
+  // Starting a new upload (offset 0) always begins a fresh .part file.
+  const partSize = offset === 0 ? 0 : fs.existsSync(/*turbopackIgnore: true*/ part) ? fs.statSync(part).size : 0
+
+  if (offset === 0) {
     try {
-      if (fs.existsSync(/*turbopackIgnore: true*/ tmp)) fs.unlinkSync(tmp)
+      fs.writeFileSync(part, chunk)
+    } catch (err) {
+      console.error('[upload] write failed:', err instanceof Error ? err.message : err)
+      return NextResponse.json({ error: 'Upload failed while saving the file. Please try again.' }, { status: 500 })
+    }
+  } else if (offset === partSize) {
+    // Expected next chunk — append.
+    try {
+      fs.appendFileSync(part, chunk)
+    } catch (err) {
+      console.error('[upload] append failed:', err instanceof Error ? err.message : err)
+      return NextResponse.json({ error: 'Upload failed while saving the file. Please try again.' }, { status: 500 })
+    }
+  } else if (offset + chunk.length <= partSize) {
+    // Duplicate of an already-written chunk (client retried after a lost
+    // response) — ignore it, the bytes are already on disk.
+  } else {
+    // Gap or partial overlap — the .part file is out of sync with the client.
+    // Report where the server actually is so the client can resume from there.
+    return NextResponse.json(
+      { error: 'Upload out of sync — please restart the upload.', received: partSize },
+      { status: 409 },
+    )
+  }
+
+  const newSize = fs.statSync(/*turbopackIgnore: true*/ part).size
+  if (newSize < total) {
+    // More chunks to come.
+    return NextResponse.json({ ok: true, received: newSize })
+  }
+
+  // Last chunk arrived — verify and move into place.
+  if (newSize !== total) {
+    try {
+      fs.unlinkSync(part)
     } catch {
       // ignore cleanup failure
     }
-    console.error('[upload] stream to disk failed:', err instanceof Error ? err.message : err)
-    return NextResponse.json({ error: 'Upload failed while saving the file. Please try again.' }, { status: 500 })
+    console.error(`[upload] size mismatch after final chunk: expected ${total}, got ${newSize}`)
+    return NextResponse.json(
+      { error: `Upload incomplete — received ${newSize.toLocaleString()} of ${total.toLocaleString()} bytes. Please try again.` },
+      { status: 400 },
+    )
   }
-
-  // Verify the WHOLE file arrived — a truncated MP4 is missing its index
-  // (moov atom) and is unreadable, which used to surface as a confusing
-  // "is it a valid video?" error even though the file was fine.
-  const expectedSize = Number.parseInt(url.searchParams.get('size') || '', 10)
-  if (Number.isFinite(expectedSize) && expectedSize > 0) {
-    const gotSize = fs.statSync(dest).size
-    if (gotSize !== expectedSize) {
-      try {
-        fs.unlinkSync(dest)
-      } catch {
-        // ignore cleanup failure
-      }
-      console.error(`[upload] incomplete upload: expected ${expectedSize} bytes, got ${gotSize}`)
-      return NextResponse.json(
-        {
-          error: `Upload incomplete — received ${gotSize.toLocaleString()} of ${expectedSize.toLocaleString()} bytes. Check your connection and try again.`,
-        },
-        { status: 400 },
-      )
-    }
-  }
+  fs.renameSync(part, dest)
 
   // Probe with ffmpeg and set up segments / trim state right away.
   const result = await finalizeUploadedMedia(scan, kind, name)
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 })
 
-  return NextResponse.json({ ok: true, duration: result.duration, size: result.size })
+  return NextResponse.json({ ok: true, done: true, duration: result.duration, size: result.size })
 }
