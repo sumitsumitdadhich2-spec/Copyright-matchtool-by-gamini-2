@@ -12,9 +12,22 @@ export function ReportPanel({ scan }: { scan: Scan }) {
 
   return (
     <section aria-label="Final report" className="panel border-success/30">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <FileCheck2 className="size-4 text-success" aria-hidden />
         <h2 className="text-sm font-semibold">Final Report</h2>
+        {report.prefilterMode != null && (
+          <span
+            className={`ml-auto rounded-full px-2.5 py-0.5 text-xs ${
+              report.prefilterMode === 'twelvelabs'
+                ? 'bg-primary/15 text-primary'
+                : 'bg-secondary text-muted-foreground'
+            }`}
+          >
+            {report.prefilterMode === 'twelvelabs'
+              ? `Twelve Labs pre-filtered — ${report.prefilterSelected ?? 0} of ${report.prefilterTotal ?? 0} chunks`
+              : 'Full scan'}
+          </span>
+        )}
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
