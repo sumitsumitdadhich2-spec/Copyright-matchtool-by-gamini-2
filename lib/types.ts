@@ -37,6 +37,9 @@ export interface ChunkState {
   qualityRetries?: number
   /** full raw Gemini outputs produced for this chunk, oldest first */
   rawOutputs?: ChunkRawOutput[]
+  /** cancelled by the EARLY-STOP system (all matches found + fast-confirmed) —
+   *  not revived on Resume unless its minute's matches get rejected */
+  skippedEarlyStop?: boolean
 }
 
 export type ShortSegmentStatus = 'pending' | 'scanning' | 'verifying' | 'done'
@@ -65,6 +68,15 @@ export interface ShortSegmentState {
    *  similarity for THIS minute (already includes ±1 buffer chunks).
    *  Unset = no pre-filter — scan every chunk (normal full scan). */
   prefilterChunks?: number[]
+  /** TL confidence per selected chunk (chunkIndex -> best cosine similarity).
+   *  Drives high→low confidence ordering for chunk scan + verification. */
+  chunkConfidence?: Record<string, number>
+  /** Expected short-video windows (ABSOLUTE short seconds) from TwelveLabs —
+   *  EARLY-STOP: jab har window ka candidate mil jaye AUR har matched chunk ka
+   *  1 segment verify ho jaye, to is minute ke bache chunks scan nahi hote. */
+  tlWindows?: { start: number; end: number }[]
+  /** chunks skipped by the early-stop system in the last run (quota saved) */
+  earlyStopSavedChunks?: number
 }
 
 // ---------- Render / Export ----------
@@ -184,6 +196,10 @@ export interface TwelveLabsState {
   indexedAt?: number
   /** human-readable indexing progress note */
   progress?: string
+  /** indexing start time — UI elapsed/estimate tracking */
+  startedAt?: number
+  /** total time the whole indexing job took (upload → ready → embeddings), ms */
+  totalMs?: number
   error?: string | null
 }
 

@@ -23,11 +23,11 @@ import type { Scan, ShortSegmentState } from './types'
 // - Indexing tasks must be polled until status is "ready".
 //
 // ACCURACY RULES (misses are unacceptable):
-// - LOW similarity threshold 0.75 (0.85+ = sure match, 0.75-0.85 = possible —
-//   BOTH are included).
+// - Similarity threshold 0.82 (quota saver: 0.75 se chunks bahut zyada bante
+//   the — 0.82 par sirf strong matches select hote hain).
 // - Every selected chunk also pulls in its +-1 neighbour chunks (buffer),
 //   because 6-second segments can straddle chunk boundaries.
-// - If ANY short segment has NO 0.75+ match anywhere in the movie, the
+// - If ANY short segment has NO 0.82+ match anywhere in the movie, the
 //   pre-filter is NOT trusted — the caller must run a normal FULL scan.
 // - Any API/parse error anywhere => caller silently falls back to full scan.
 // ---------------------------------------------------------------------------
@@ -35,8 +35,8 @@ import type { Scan, ShortSegmentState } from './types'
 const TL_BASE = 'https://api.twelvelabs.io/v1.3'
 const INDEX_NAME = 'cmt-prefilter'
 
-/** Low threshold on purpose: 0.85+ = sure, 0.75-0.85 = possible — include BOTH. */
-export const TL_SIMILARITY_THRESHOLD = 0.75
+/** Threshold 0.82: strong matches only — kam chunks = kam quota. */
+export const TL_SIMILARITY_THRESHOLD = 0.82
 
 export class TwelveLabsError extends Error {
   constructor(message: string) {
@@ -321,6 +321,11 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 export interface PrefilterComputation {
   /** null = pre-filter must NOT be trusted — run a normal FULL scan */
   perSegment: Map<number, Set<number>> | null
+  /** per short-minute: chunkIndex -> best cosine similarity (confidence high→low ordering) */
+  confidence?: Map<number, Map<number, number>>
+  /** per short-minute: expected short-video windows (ABSOLUTE short seconds)
+   *  that MUST each get a matched candidate — drives the early-stop system */
+  expectedWindows?: Map<number, { start: number; end: number }[]>
   reason?: string
 }
 
@@ -351,33 +356,33 @@ export function computePrefilterChunks(
     movieByOption.set(m.option, list)
   }
 
-  /** movie chunk indexes matched per SHORT TL segment (start-time keyed) */
-  const matchesByShortSeg = new Map<TLSegment, { bestSim: number; movieTimes: number[] }>()
+  /** movie hits per SHORT TL segment: each hit carries its movie time + similarity */
+  const matchesByShortSeg = new Map<TLSegment, { bestSim: number; hits: { t: number; sim: number }[] }>()
 
   for (const s of shortEmb) {
     const candidates = movieByOption.get(s.option) || []
     let bestSim = -1
-    const movieTimes: number[] = []
+    const hits: { t: number; sim: number }[] = []
     for (const m of candidates) {
       const sim = cosineSimilarity(s.embedding, m.embedding)
       if (sim > bestSim) bestSim = sim
-      // Include EVERY 0.75+ window (0.85+ = sure, 0.75-0.85 = possible — both kept).
+      // Include EVERY 0.82+ window — strong matches only (quota saver).
       if (sim >= TL_SIMILARITY_THRESHOLD) {
-        movieTimes.push(m.start, m.end)
+        hits.push({ t: m.start, sim }, { t: m.end, sim })
       }
     }
     const prev = matchesByShortSeg.get(s)
-    if (!prev) matchesByShortSeg.set(s, { bestSim, movieTimes })
+    if (!prev) matchesByShortSeg.set(s, { bestSim, hits })
   }
 
   // ACCURACY RULE: a short TL segment counts as "matched" when ANY of its
-  // embedding options found a 0.75+ window. Group by time window first.
-  const byWindow = new Map<string, { start: number; end: number; matched: boolean; movieTimes: number[] }>()
+  // embedding options found a 0.82+ window. Group by time window first.
+  const byWindow = new Map<string, { start: number; end: number; matched: boolean; hits: { t: number; sim: number }[] }>()
   for (const [seg, res] of matchesByShortSeg) {
     const key = `${seg.start.toFixed(1)}-${seg.end.toFixed(1)}`
-    const w = byWindow.get(key) || { start: seg.start, end: seg.end, matched: false, movieTimes: [] }
-    if (res.movieTimes.length > 0) w.matched = true
-    w.movieTimes.push(...res.movieTimes)
+    const w = byWindow.get(key) || { start: seg.start, end: seg.end, matched: false, hits: [] }
+    if (res.hits.length > 0) w.matched = true
+    w.hits.push(...res.hits)
     byWindow.set(key, w)
   }
 
@@ -394,21 +399,35 @@ export function computePrefilterChunks(
   const timeToChunk = (t: number): number => Math.floor((t - trimStart) / CHUNK_SECONDS)
 
   const perSegment = new Map<number, Set<number>>()
+  const confidence = new Map<number, Map<number, number>>()
+  const expectedWindows = new Map<number, { start: number; end: number }[]>()
   for (const shortMin of shortSegments) {
     const set = new Set<number>()
+    const conf = new Map<number, number>()
+    const windows: { start: number; end: number }[] = []
     for (const w of byWindow.values()) {
       // Does this short TL window overlap this short minute?
       if (w.start >= shortMin.end || w.end <= shortMin.start) continue
-      for (const t of w.movieTimes) {
-        const ci = timeToChunk(t)
+      // Expected window (clipped to the minute) — early-stop needs each of
+      // these covered by at least one candidate before chunk scan can stop.
+      windows.push({ start: Math.max(w.start, shortMin.start), end: Math.min(w.end, shortMin.end) })
+      for (const h of w.hits) {
+        const ci = timeToChunk(h.t)
         // Selected chunk + its +-1 neighbours (buffer for boundary-straddling segments).
         for (const c of [ci - 1, ci, ci + 1]) {
-          if (c >= 0 && c < chunkCount) set.add(c)
+          if (c >= 0 && c < chunkCount) {
+            set.add(c)
+            // Neighbour chunks inherit a slightly lower confidence than the direct hit.
+            const sim = c === ci ? h.sim : h.sim - 0.03
+            if ((conf.get(c) ?? -1) < sim) conf.set(c, sim)
+          }
         }
       }
     }
     perSegment.set(shortMin.index, set)
+    confidence.set(shortMin.index, conf)
+    expectedWindows.set(shortMin.index, windows)
   }
 
-  return { perSegment }
+  return { perSegment, confidence, expectedWindows }
 }
