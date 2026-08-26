@@ -37,6 +37,7 @@ import {
   loadEmbeddings,
   saveEmbeddings,
   computePrefilterChunks,
+  TL_SIMILARITY_THRESHOLD,
 } from './twelvelabs'
 import {
   getClient,
@@ -87,9 +88,11 @@ interface Job {
   /** verification phase: candidate-group queue (indexes into scan.candidateGroups) */
   verifyQueue: number[]
   verifyInFlight: Set<number>
-  /** true once the CURRENT minute's chunk workers have all drained — verify
+  /** true once ALL minutes' chunk workers have drained — the GLOBAL verify
    *  workers keep waiting for new candidates until this flips to true. */
   chunkPhaseDone: boolean
+  /** set when a rejected group revived early-stop-skipped chunks — triggers an extra scan pass */
+  earlyStopRevived: boolean
   stopping: boolean
   /** pacing state keyed by `${laneIdx}|${modelId}`: earliest time the next request may be sent.
    *  Set after every request from its actual token size so every model runs at full TPM capacity. */
@@ -265,6 +268,7 @@ class Scheduler {
       verifyQueue: [],
       verifyInFlight: new Set(),
       chunkPhaseDone: false,
+      earlyStopRevived: false,
       stopping: false,
       nextFreeAt: {},
       cooldownUntil: {},
@@ -658,6 +662,12 @@ class Scheduler {
       for (const seg of selectedSegs) {
         const set = result.perSegment.get(seg.index) ?? new Set<number>()
         seg.prefilterChunks = [...set].sort((a, b) => a - b)
+        // CONFIDENCE (high→low ordering) + EXPECTED WINDOWS (early-stop system):
+        // persist both so Resume keeps the same ordering + early-stop behaviour.
+        const conf = result.confidence?.get(seg.index)
+        seg.chunkConfidence = conf ? Object.fromEntries([...conf.entries()].map(([k, v]) => [String(k), v])) : undefined
+        const windows = result.expectedWindows?.get(seg.index)
+        seg.tlWindows = windows && windows.length > 0 ? windows : undefined
         for (const c of seg.chunks) {
           const inRange = chunkOverlapsSegRange(scan, seg, c.index)
           if (c.status === 'cancelled' && set.has(c.index) && inRange) c.status = 'pending'
@@ -675,8 +685,19 @@ class Scheduler {
       addLog(
         scan,
         'success',
-        `Twelve Labs pre-filter: ${selected} of ${Math.max(totalBefore, selected)} chunks selected (threshold 0.75, ±1 buffer chunks) — sirf yehi chunks Gemini ko jayenge`,
+        `Twelve Labs pre-filter: ${selected} of ${Math.max(totalBefore, selected)} chunks selected (threshold ${TL_SIMILARITY_THRESHOLD}, ±1 buffer chunks) — sirf yehi chunks Gemini ko jayenge`,
       )
+      // PER-MINUTE BREAKDOWN (UI + logs): har minute ke planned chunks + expected windows.
+      for (const seg of selectedSegs) {
+        const n = seg.chunks.filter((c) => c.status === 'pending').length
+        if (n > 0) {
+          addLog(
+            scan,
+            'info',
+            `Twelve Labs plan — Minute ${seg.index + 1}: ${n} chunk(s) scan honge${seg.tlWindows?.length ? `, ${seg.tlWindows.length} expected match window(s) (early-stop active: sab windows confirm hote hi bache chunks skip)` : ''}`,
+          )
+        }
+      }
       this.mark(job)
     } catch (err) {
       // ANY Twelve Labs failure = silent fallback. The scan itself never fails.
@@ -703,39 +724,59 @@ class Scheduler {
     this.prepareVerifyState(scan)
     this.enqueueNewGroups(job, true)
 
-    // PER-MINUTE PASSES with PIPELINE PARALLELISM: within a minute, the two
-    // dedicated CHUNK models map chunks while the separate VERIFY models verify
-    // finished chunks' candidates AT THE SAME TIME — neither pipeline ever
-    // waits for the other. Minute N+1 still only starts after minute N is
-    // fully mapped AND verified (API tokens stay focused on one short minute).
-    for (const seg of segments) {
-      if (job.stopping) break
-      // MINUTE SELECTION: unselected minutes are skipped entirely (quota saver).
-      if (seg.selected === false) continue
-      const pending = seg.chunks.filter((c) => c.status === 'pending')
-      if (pending.length === 0 && seg.status === 'done' && job.verifyQueue.length === 0 && job.verifyInFlight.size === 0) continue
+    // GLOBAL VERIFY PIPELINE: verify workers start ONCE and keep running in the
+    // background for the WHOLE scan — chunk models aur verify models alag hain,
+    // isliye minute N ki verification chalte hue minute N+1 ke chunks scan hote
+    // hain (user request: sab chunks settle hote hi aage badho, verification ka
+    // wait mat karo — wo background me chalti rahegi).
+    let verifyPhase: Promise<unknown> = Promise.resolve()
+    const startVerifyWorkers = () => {
+      const ws: Promise<void>[] = []
+      for (const lane of job.lanes) {
+        for (const m of VERIFY_MODEL_POOL) ws.push(this.verifyWorker(job, lane, m))
+      }
+      verifyPhase = Promise.all(ws)
+    }
+    job.chunkPhaseDone = false
+    startVerifyWorkers()
 
-      scan.currentShortSegment = seg.index
-      job.seg = seg
-      // Mirror: scan.chunks IS this segment's chunks array (same reference),
-      // so the existing worker code + UI keep working unchanged.
-      scan.chunks = seg.chunks
-      scan.status = 'scanning'
-      this.mark(job)
+    // OUTER PASSES: agar early-stop ke baad koi group REJECT ho jaye aur uske
+    // minute ke skipped chunks wapas pending ho jayen, to ek aur pass chalega.
+    const MAX_PASSES = 6
+    for (let pass = 0; pass < MAX_PASSES; pass++) {
+      job.earlyStopRevived = false
 
-      if (pending.length > 0) {
+      // PER-MINUTE CHUNK PASSES: within a minute the two dedicated CHUNK models
+      // map chunks while the global verify workers check candidates in parallel.
+      for (const seg of segments) {
+        if (job.stopping) break
+        // MINUTE SELECTION: unselected minutes are skipped entirely (quota saver).
+        if (seg.selected === false) continue
+        const pending = seg.chunks.filter((c) => c.status === 'pending')
+        if (pending.length === 0) continue
+
+        scan.currentShortSegment = seg.index
+        job.seg = seg
+        // Mirror: scan.chunks IS this segment's chunks array (same reference),
+        // so the existing worker code + UI keep working unchanged.
+        scan.chunks = seg.chunks
+        scan.status = 'scanning'
         seg.status = 'scanning'
-        job.queue = pending.map((c) => c.index)
-        job.chunkPhaseDone = false
+        // CONFIDENCE ORDER (TwelveLabs): sabse zyada confident chunks PEHLE scan
+        // hote hain — matches jaldi milte hain, early-stop jaldi fire hota hai.
+        job.queue = this.orderByConfidence(seg, pending.map((c) => c.index))
+        const hasConf = Boolean(seg.chunkConfidence && Object.keys(seg.chunkConfidence).length > 0)
+        this.mark(job)
+
         if (multi) {
           const r = segMovieRange(scan, seg)
           const rangeNote = r.custom ? ` (movie range ${ts(r.start)}–${ts(r.end)} only — baaki chunks skipped)` : ''
-          addLog(scan, 'info', `Minute ${seg.index + 1}/${segments.length}: scanning short ${ts(seg.start)}–${ts(seg.end)} against ${pending.length} pending movie chunk(s)${rangeNote}`)
+          addLog(scan, 'info', `Minute ${seg.index + 1}/${segments.length}: scanning short ${ts(seg.start)}–${ts(seg.end)} against ${pending.length} pending movie chunk(s)${rangeNote}${hasConf ? ' — confidence order high→low' : ''}`)
         }
         addLog(
           scan,
           'info',
-          `Pipeline parallelism ON: chunk models (${CHUNK_MODEL_POOL.map((m) => m.id).join(', ')}) map chunks while verify models check finished candidates in parallel`,
+          `Pipeline parallelism ON: chunk models (${CHUNK_MODEL_POOL.map((m) => m.id).join(', ')}) map chunks while verify models check candidates in the background — verification ke liye agla minute WAIT NAHI karta`,
         )
         this.mark(job)
 
@@ -750,56 +791,50 @@ class Scheduler {
         for (const lane of job.lanes) {
           for (const m of CHUNK_MODEL_POOL) chunkWorkers.push(this.worker(job, lane, m))
         }
-        // VERIFY PIPELINE (runs CONCURRENTLY): one worker per (key lane ×
-        // VERIFY model) — these ONLY verify candidate groups, never chunk-map.
-        // They idle-wait until chunk workers feed the queue, and exit once the
-        // chunk phase is done AND the verify queue has fully drained.
-        const verifyWorkers: Promise<void>[] = []
-        for (const lane of job.lanes) {
-          for (const m of VERIFY_MODEL_POOL) verifyWorkers.push(this.verifyWorker(job, lane, m))
-        }
-
-        const chunkPhase = Promise.all(chunkWorkers).then(() => {
-          job.chunkPhaseDone = true
-          // Catch any candidates merged by the very last chunk.
-          this.enqueueNewGroups(job)
-          if (!job.stopping && !seg.chunks.some((c) => c.status === 'pending' || c.status === 'scanning')) {
-            seg.status = 'verifying'
-            if (job.verifyQueue.length > 0 || job.verifyInFlight.size > 0) scan.status = 'verifying'
-            this.mark(job)
-          }
-        })
-        await Promise.all([chunkPhase, ...verifyWorkers])
-      } else {
-        // Nothing to map for this minute — verification-only pass.
-        // Next minute still preps in the background during verification.
-        this.prepareNextSegment(job, segments, seg.index)
-        job.chunkPhaseDone = true
+        await Promise.all(chunkWorkers)
+        // Catch any candidates merged by the very last chunk.
         this.enqueueNewGroups(job)
-        if (job.verifyQueue.length > 0 || job.verifyInFlight.size > 0) {
-          seg.status = 'verifying'
-          scan.status = 'verifying'
-          this.mark(job)
-          const verifyWorkers: Promise<void>[] = []
-          for (const lane of job.lanes) {
-            for (const m of VERIFY_MODEL_POOL) verifyWorkers.push(this.verifyWorker(job, lane, m))
-          }
-          await Promise.all(verifyWorkers)
+
+        if (job.stopping) break
+        // Quota exhausted mid-minute: chunks still pending — do NOT advance.
+        if (seg.chunks.some((c) => c.status === 'pending' || c.status === 'scanning')) break
+
+        // Minute ke saare chunks settle — turant AGLE minute par badho.
+        // Is minute ki bachi verification background me poori hoti rahegi.
+        const segGroups = (scan.candidateGroups || []).filter((g) => g.shortStart < seg.end && g.shortEnd > seg.start)
+        const unresolved = segGroups.filter((g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning')
+        seg.status = unresolved.length > 0 ? 'verifying' : 'done'
+        if (multi) {
+          addLog(
+            scan,
+            'success',
+            unresolved.length > 0
+              ? `Minute ${seg.index + 1}/${segments.length}: chunk scan complete — ${unresolved.length} group(s) background me verify ho rahe hain, agla minute abhi start ho raha hai (no wait)`
+              : `Minute ${seg.index + 1}/${segments.length} complete — mapped + verified against the whole movie`,
+          )
         }
+        this.mark(job)
       }
-      if (job.stopping) break
 
-      // Quota exhausted mid-minute: chunks still pending — do NOT advance.
-      if (seg.chunks.some((c) => c.status === 'pending' || c.status === 'scanning')) break
+      // All minutes' chunk phases done (or quota-blocked) — let the verify
+      // pipeline drain fully now.
+      job.seg = null
+      job.chunkPhaseDone = true
+      if (job.verifyQueue.length > 0 || job.verifyInFlight.size > 0) {
+        scan.status = 'verifying'
+        this.mark(job)
+      }
+      await verifyPhase
 
-      const leftoverNow = (scan.candidateGroups || []).filter(
-        (g) => g.status === 'pending' || g.status === 'verifying' || g.status === 'rescanning',
+      // EARLY-STOP REVIVE PASS: kisi rejected group ne skipped chunks wapas
+      // pending kiye? To unhe scan karne ke liye ek aur pass chalao.
+      const revivedPending = segments.some(
+        (s) => s.selected !== false && s.chunks.some((c) => c.status === 'pending'),
       )
-      if (leftoverNow.length > 0) break // quota exhausted mid-verification — resumable below
-
-      seg.status = 'done'
-      if (multi) addLog(scan, 'success', `Minute ${seg.index + 1}/${segments.length} complete — mapped + verified against the whole movie`)
-      this.mark(job)
+      if (job.stopping || !job.earlyStopRevived || !revivedPending) break
+      addLog(scan, 'warn', `Early-stop revive: rejected match ki wajah se kuch skipped chunks wapas queue me hain — extra scan pass ${pass + 2} start`)
+      job.chunkPhaseDone = false
+      startVerifyWorkers()
     }
 
     // All work over. Persist final model states.
@@ -926,6 +961,122 @@ class Scheduler {
         if (c.rescanVerdict === 'verifying') c.rescanVerdict = 'pending'
       }
     }
+  }
+
+  // ---------- TL confidence ordering + EARLY-STOP quick-confirm system ----------
+
+  /** TwelveLabs confidence of a chunk within a minute (higher = scan/verify first). */
+  private chunkConf(seg: ShortSegmentState, chunkIndex: number): number {
+    return seg.chunkConfidence?.[String(chunkIndex)] ?? -1
+  }
+
+  /** Order chunk indexes by TL confidence HIGH → LOW (ties: natural order). */
+  private orderByConfidence(seg: ShortSegmentState, indexes: number[]): number[] {
+    return [...indexes].sort((a, b) => this.chunkConf(seg, b) - this.chunkConf(seg, a) || a - b)
+  }
+
+  /** Find the short minute a short-video timestamp belongs to. */
+  private segForShortTime(scan: Scan, t: number): ShortSegmentState | null {
+    return (scan.shortSegments || []).find((s) => t >= s.start && t < s.end) || null
+  }
+
+  /** Verify-priority of a candidate group = best TL confidence among its chunks. */
+  private groupConfidence(scan: Scan, g: CandidateGroup): number {
+    const seg = this.segForShortTime(scan, g.shortStart)
+    if (!seg) return -1
+    let best = -1
+    for (const c of g.candidates) best = Math.max(best, this.chunkConf(seg, c.chunkIndex))
+    return best
+  }
+
+  /** EARLY-STOP QUICK-CONFIRM (quota saver, accuracy-safe):
+   *  Jab CURRENT minute ke SAB TwelveLabs expected windows par candidate mil
+   *  chuke hain AUR har matched chunk ka kam se kam EK segment verifier se
+   *  SAME confirm ho chuka hai — to us minute ke bache hue chunks scan karna
+   *  band (cancelled + skippedEarlyStop). Baaki matches background me poori
+   *  tarah verify hote rehte hain. Agar baad me koi group reject ho jaye to
+   *  reviveEarlyStopSkipped() skipped chunks wapas queue me daal deta hai. */
+  private checkEarlyStop(job: Job) {
+    const { scan } = job
+    const seg = job.seg
+    if (!seg || job.stopping) return
+    const windows = seg.tlWindows
+    if (!windows || windows.length === 0) return
+    // Kuch skip karne layak bacha bhi hai?
+    if (!seg.chunks.some((c) => c.status === 'pending')) return
+
+    const groups = (scan.candidateGroups || []).filter(
+      (g) => g.shortStart < seg.end && g.shortEnd > seg.start && g.status !== 'rejected',
+    )
+    // 1) COVERAGE: har expected TL window par kam se kam ek candidate group ho.
+    for (const w of windows) {
+      if (!groups.some((g) => g.shortStart < w.end && g.shortEnd > w.start)) return
+    }
+    // 2) QUICK-CONFIRM: har contributing chunk ka apna 1 candidate SAME confirm ho
+    //    (poore group ki jagah sirf 1 segment per chunk — baaki background me).
+    const matchedChunks = new Set<number>()
+    for (const g of groups) for (const c of g.candidates) matchedChunks.add(c.chunkIndex)
+    if (matchedChunks.size === 0) return
+    for (const ci of matchedChunks) {
+      const confirmed = groups.some((g) =>
+        g.candidates.some((c) => c.chunkIndex === ci && (c.verdict === 'same' || c.rescanVerdict === 'same')),
+      )
+      if (!confirmed) return
+    }
+
+    // Sab conditions poori — is minute ke bache chunks skip karo.
+    let saved = 0
+    for (const c of seg.chunks) {
+      if (c.status === 'pending') {
+        c.status = 'cancelled'
+        c.skippedEarlyStop = true
+        saved++
+      }
+    }
+    job.queue = job.queue.filter((ci) => seg.chunks[ci]?.status === 'pending')
+    seg.earlyStopSavedChunks = saved
+    if (saved > 0) {
+      addLog(
+        scan,
+        'success',
+        `EARLY-STOP — Minute ${seg.index + 1}: sab ${windows.length} expected window(s) covered + har matched chunk (${matchedChunks.size}) ka 1 segment SAME confirm — bache ${saved} chunk(s) skip, quota saved. Baaki matches background me verify ho rahe hain.`,
+      )
+      this.mark(job)
+    }
+  }
+
+  /** Group REJECT hone par: agar uske minute me early-stop se skip hue chunks
+   *  hain aur us short window ka ab koi zinda candidate nahi bacha, to skipped
+   *  chunks wapas pending karke scan me daalo — sahi match ab bhi mil sakta hai. */
+  private reviveEarlyStopSkipped(job: Job, g: CandidateGroup) {
+    const { scan } = job
+    const seg = this.segForShortTime(scan, g.shortStart)
+    if (!seg) return
+    const skipped = seg.chunks.filter((c) => c.status === 'cancelled' && c.skippedEarlyStop)
+    if (skipped.length === 0) return
+    // Kya is short window par ab bhi koi non-rejected group hai? Ho to revive ki zaroorat nahi.
+    const stillCovered = (scan.candidateGroups || []).some(
+      (x) => x !== g && x.status !== 'rejected' && sameShortSegment(x.shortStart, x.shortEnd, g.shortStart, g.shortEnd),
+    )
+    if (stillCovered) return
+    for (const c of skipped) {
+      c.status = 'pending'
+      delete c.skippedEarlyStop
+    }
+    delete seg.earlyStopSavedChunks
+    if (seg.status === 'done' || seg.status === 'verifying') seg.status = 'pending'
+    job.earlyStopRevived = true
+    // Agar yehi minute abhi bhi active hai to chunks LIVE queue me wapas jaate
+    // hain; warna scan-loop ka agla pass unhe utha lega.
+    if (job.seg === seg) {
+      job.queue.push(...this.orderByConfidence(seg, skipped.map((c) => c.index)))
+    }
+    addLog(
+      scan,
+      'warn',
+      `Minute ${seg.index + 1}: match reject hone se coverage toot gayi — early-stop se skip hue ${skipped.length} chunk(s) wapas scan queue me (accuracy first)`,
+    )
+    this.mark(job)
   }
 
   /** Incrementally (re)build candidate groups from fresh unverified matches and
