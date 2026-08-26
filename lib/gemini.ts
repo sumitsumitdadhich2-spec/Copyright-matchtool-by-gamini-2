@@ -159,7 +159,9 @@ export async function mapChunkRequest(
 
 // ---------- Verifier (candidate confirmation) ----------
 
-/** Special prompt for the VERIFIER: two tiny clips, decide SAME vs DIFFERENT. */
+/** Special prompt for the VERIFIER: two tiny clips, decide SAME vs DIFFERENT.
+ * Forces the model to WRITE EVIDENCE from both clips BEFORE giving a verdict,
+ * so it cannot answer from a vague first impression (main source of false results). */
 export const VERIFY_PROMPT = `You are a forensic video verifier. You are given TWO very short clips. Both are exactly 24 fps — compare them frame by frame at 24 fps precision.
 
 - Video 1: ek segment jo ek SHORT VIDEO se kata gaya hai.
@@ -167,19 +169,46 @@ export const VERIFY_PROMPT = `You are a forensic video verifier. You are given T
 
 SAWAL: Kya ye dono clips EXACT SAME footage hain — same recording, same moment, frame-for-frame?
 
-RULES:
-1. Visuals AUR audio dono compare karo, frame by frame.
-2. Dialogue sabse strong fingerprint hai: agar dono clips me dialogue hai to EXACT same words, same voice hone chahiye. Words alag = DIFFERENT.
-3. SIMILAR IS NOT SAME: same actors, same location, same costume — lekin CLEARLY different take ya different moment (alag action, alag dialogue words, alag shot) = DIFFERENT.
-4. QUALITY DIFFERENCE IS NOT DIFFERENT: crop, resize, compression artifacts, blur, color-grade, brightness, watermark, text-overlay, audio quality, frame-rate wobble — ye sab IGNORE karo. Underlying footage same ho to VERDICT SAME hi hoga, chahe quality kitni bhi alag ho.
-5. BOUNDARY TOLERANCE: dono clips ke start/end par halka sa misalignment ho sakta hai (ek clip doosri se ~0.5s aage/piche shifted). Agar clips ka OVERLAPPING hissa frame-for-frame same footage hai, to VERDICT SAME do — boundary shift DIFFERENT ka reason NAHI hai.
-6. BALANCED DECISION (sabse important): Ye candidate pehle se ek mapping model ne dhundh kar diya hai, isliye SAME hona bhi utna hi likely hai jitna DIFFERENT. Na zabardasti SAME bolo, na zabardasti DIFFERENT. DIFFERENT SIRF tab bolo jab tum kam se kam EK CONCRETE difference naam le kar bata sako (e.g. "dialogue words alag hain: 'X' vs 'Y'", "action alag hai: A vs B", "bilkul alag scene/shot hai"). Agar koi concrete difference nahi dikh raha aur footage match karta hai, to SAME bolo. Sirf vague feeling ("lag raha hai alag hai") DIFFERENT ka valid reason NAHI hai — REASON line me concrete evidence likhna zaroori hai.
+Respond in Hinglish (Hindi written in Latin script). Dialogue hamesha VERBATIM quote karo, original language me.
 
-Answer EXACTLY in this format (aur kuch nahi):
+Tumhara answer TEEN parts me hoga. Pehle EVIDENCE, phir COMPARE, phir VERDICT. Bina evidence likhe seedha verdict dena FORBIDDEN hai — yahi sabse badi galti hai jo false results deti hai.
+
+=====================
+STEP 1 — EVIDENCE (dono clips ko alag-alag dhyan se dekho)
+=====================
+CLIP 1 ke liye 2-4 short lines likho:
+- Kya action ho raha hai (kaun kya karta hai, kis order me)
+- Agar koi bolta hai: EXACT quoted words
+- Shot/camera: close-up ya wide, camera static ya moving, koi cut hai to kahan
+CLIP 2 ke liye bhi EXACTLY yahi 2-4 lines likho, independently — Clip 1 ki lines copy karke mat likho.
+
+=====================
+STEP 2 — COMPARE (point by point)
+=====================
+In anchors par dono clips ko compare karo, har ek ke aage MATCH / MISMATCH / N.A. likho:
+- DIALOGUE: exact words + voice same? (sabse strong fingerprint — words alag = DIFFERENT, pakka)
+- ACTION: same movements, same order, same timing?
+- SHOT: same framing, same camera angle, same cuts on same beats?
+- BACKGROUND/DETAILS: same background elements, props, costume, lighting continuity?
+
+=====================
+STEP 3 — VERDICT (rules apply karo)
+=====================
+RULES:
+1. SAME ka matlab: same RECORDING, same MOMENT — sirf same scene nahi. Visuals AUR audio dono se confirm karo.
+2. SIMILAR IS NOT SAME: same actors, same location, same costume — lekin different take ya different moment (alag action, alag words, alag shot) = DIFFERENT.
+3. QUALITY DIFFERENCE IS NOT DIFFERENT: crop, resize, zoom, compression artifacts, blur, color-grade, brightness, watermark, text-overlay, subtitles, audio quality/background music added, frame-rate wobble, mirrored/flipped image — ye sab IGNORE karo. Underlying footage same ho to VERDICT SAME hi hoga, chahe quality kitni bhi alag ho. In cheezon ko DIFFERENT ka reason banana FORBIDDEN hai.
+4. BOUNDARY TOLERANCE: dono clips ke start/end par misalignment ho sakta hai (ek clip doosri se ~0.5-1s aage/piche shifted, ya ek clip me thoda extra footage aage/piche). Sirf OVERLAPPING hisse ko judge karo. Agar overlap frame-for-frame same footage hai, to VERDICT SAME — "Clip 2 me shuru/end me extra frames hain" DIFFERENT ka reason NAHI hai.
+5. DIFFERENT ke liye CONCRETE EVIDENCE zaroori hai: DIFFERENT sirf tab bolo jab tum kam se kam EK concrete, nameable difference de sako jo Step 2 ke kisi MISMATCH se aata ho (e.g. "dialogue words alag: 'X' vs 'Y'", "Clip 1 me wo uthta hai, Clip 2 me baitha rehta hai", "bilkul alag scene"). Vague feeling ("lag raha hai alag hai", "timing thodi off lagti hai") valid reason NAHI hai.
+6. SAME ke liye bhi POSITIVE EVIDENCE zaroori hai: SAME sirf tab bolo jab Step 2 me DIALOGUE ya ACTION me se kam se kam ek clear MATCH ho + koi real MISMATCH na ho. "Koi difference nahi dikha" akela kaafi nahi hai agar tumne clips theek se dekhi hi nahi.
+7. BALANCED DECISION: Ye candidate ek mapping model ne suggest kiya hai — wo sahi bhi ho sakta hai, galat bhi. SAME aur DIFFERENT dono equally likely hain. Kisi taraf bias mat rakho; sirf Step 1-2 ke evidence se decide karo.
+8. SELF-CHECK: Verdict likhne se pehle apne Step 1 ke notes dobara padho. Kya tumhara verdict tumhare khud ke likhe evidence se consistent hai? Agar Step 2 me sab MATCH/N.A. hai lekin tum DIFFERENT likh rahe ho (ya koi MISMATCH hai aur tum SAME likh rahe ho), to verdict galat hai — use theek karo.
+
+Answer ke END me EXACTLY ye do lines do (yahi format, aur kuch nahi in lines me):
 VERDICT: SAME
 ya
 VERDICT: DIFFERENT
-REASON: <ek chhoti line Hinglish me>`
+REASON: <ek chhoti line Hinglish me — Step 2 ke concrete evidence ke saath>`
 
 /** Special prompt for a RESCAN: one failed short segment + the full 1-minute chunk it was claimed in.
  * Structured like the chunk-map prompt (HISSA 1 time map + HISSA 2 hunt) for maximum accuracy. */
@@ -291,11 +320,15 @@ export async function rescanRequest(
   }
 }
 
-/** Parse the verifier's answer. Returns null when no clear verdict was given. */
+/** Parse the verifier's answer. Returns null when no clear verdict was given.
+ * The verdict/reason lines come at the END of the response (after the evidence
+ * steps), so always take the LAST occurrence of each. */
 export function parseVerdict(raw: string): { same: boolean; reason: string } | null {
-  const m = raw.match(/VERDICT\s*:\s*(SAME|DIFFERENT)/i)
-  if (!m) return null
-  const r = raw.match(/REASON\s*:\s*(.+)/i)
+  const verdicts = [...raw.matchAll(/VERDICT\s*:\s*(SAME|DIFFERENT)/gi)]
+  if (verdicts.length === 0) return null
+  const m = verdicts[verdicts.length - 1]
+  const reasons = [...raw.matchAll(/REASON\s*:\s*(.+)/gi)]
+  const r = reasons.length > 0 ? reasons[reasons.length - 1] : null
   return { same: m[1].toUpperCase() === 'SAME', reason: (r?.[1] || '').trim().slice(0, 300) }
 }
 
