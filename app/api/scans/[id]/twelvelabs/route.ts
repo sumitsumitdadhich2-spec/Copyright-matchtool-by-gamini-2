@@ -73,7 +73,8 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
     return NextResponse.json({ ok: true, alreadyIndexed: true })
   }
 
-  scan.twelveLabs = { status: 'indexing', progress: 'Uploading movie to Twelve Labs...', error: null }
+  const indexingStartedAt = Date.now()
+  scan.twelveLabs = { status: 'indexing', progress: 'Uploading movie to Twelve Labs...', error: null, startedAt: indexingStartedAt }
   addLog(scan, 'info', 'Twelve Labs: movie indexing started (upload → index → download embeddings)')
   saveScan(scan, { immediate: true })
   indexing.add(id)
@@ -107,6 +108,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
 
       const s = getScan(id)
       if (s) {
+        const totalMs = Date.now() - indexingStartedAt
         s.twelveLabs = {
           status: 'ready',
           indexId,
@@ -114,9 +116,11 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
           videoId,
           segmentCount: segments.length,
           indexedAt: Date.now(),
+          startedAt: indexingStartedAt,
+          totalMs,
           error: null,
         }
-        addLog(s, 'success', `Twelve Labs: movie indexed — ${segments.length} segment embedding(s) saved locally for reuse`)
+        addLog(s, 'success', `Twelve Labs: movie indexed — ${segments.length} segment embedding(s) saved locally for reuse (total time: ${Math.round(totalMs / 60000)}m ${Math.round((totalMs % 60000) / 1000)}s)`)
         saveScan(s, { immediate: true })
       }
     } catch (err) {

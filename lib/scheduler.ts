@@ -1214,6 +1214,50 @@ class Scheduler {
     return fn()
   }
 
+  /** BACKUP-UPLOAD + BUSY-RETRY (verify/rescan — "sab jagah" insurance):
+   *  clip ki EK backup copy background me pehle se upload hoti hai. Request
+   *  busy/overloaded/5xx fail ho to dobara upload ka time waste kiye BINA
+   *  turant backup URI se new request jaati hai — aur retry ke dauran agla
+   *  backup bhi ban jaata hai. Result aate hi unused backup delete. */
+  private async sendWithClipBackup(
+    job: Job,
+    lane: KeyLane,
+    filePath: string,
+    mainUri: string,
+    uploadedNames: string[],
+    send: (uri: string) => Promise<string>,
+    busyLabel: string,
+  ): Promise<string> {
+    let pendingBackup: Promise<{ uri: string; name: string }> | null = uploadVideo(lane.ai, filePath)
+    pendingBackup.catch(() => {})
+    try {
+      let raw: string
+      try {
+        raw = await send(mainUri)
+      } catch (err) {
+        const e = classifyError(err)
+        const transient =
+          e.kind === 'rate' || /overload|busy|503|500|internal|try again|temporarily/i.test(e.message)
+        const backup = transient && pendingBackup ? await pendingBackup.catch(() => null) : null
+        if (!backup) throw err
+        pendingBackup = null
+        uploadedNames.push(backup.name)
+        addLog(job.scan, 'warn', `${busyLabel}: API busy — pre-uploaded BACKUP clip se turant retry (upload wait zero)`)
+        this.mark(job)
+        // Retry ke dauran agla backup bhi taiyaar — dobara busy aaye to bhi ready.
+        pendingBackup = uploadVideo(lane.ai, filePath)
+        pendingBackup.catch(() => {})
+        raw = await send(backup.uri)
+      }
+      return raw
+    } finally {
+      // Result mil gaya (ya final fail) — bacha hua unused backup delete.
+      if (pendingBackup) {
+        void pendingBackup.then((f) => deleteFileQuiet(lane.ai, f.name)).catch(() => {})
+      }
+    }
+  }
+
   /** Full verify → rescan → re-verify pipeline for ONE candidate group.
    *  All clips are cut with millisecond precision and sent to Gemini at 24 fps. */
   private async processGroup(job: Job, lane: KeyLane, m: ModelSpec, g: CandidateGroup) {
@@ -1290,7 +1334,17 @@ class Scheduler {
         const vm = pickVerifyModel()
         addLog(scan, 'info', `Verify: short ${ts(g.shortStart)}–${ts(g.shortEnd)} vs movie ${ts(c.movieStart)}–${ts(c.movieEnd)}${needsPad ? ' (padded)' : ''} on ${vm.id} (key ${lane.idx})`)
         const clipSecs = shortDur + padBefore + padAfter + Math.max(1, c.movieEnd - c.movieStart) + padBefore + padAfter
-        const raw = await this.paceAndSend(job, lane, vm, clipSecs, () => verifyRequest(lane.ai, vm.id, shortClip.uri, movieClip.uri, verifyPadNote))
+        const raw = await this.paceAndSend(job, lane, vm, clipSecs, () =>
+          this.sendWithClipBackup(
+            job,
+            lane,
+            movieClipFile,
+            movieClip.uri,
+            uploadedNames,
+            (uri) => verifyRequest(lane.ai, vm.id, shortClip.uri, uri, verifyPadNote),
+            `Verify short ${ts(g.shortStart)}–${ts(g.shortEnd)} on ${vm.id} (key ${lane.idx})`,
+          ),
+        )
         const v = parseVerdict(raw)
         if (!v) throw new GeminiError('other', 'Verifier gave no clear VERDICT line')
 
@@ -1361,8 +1415,28 @@ class Scheduler {
             addLog(scan, 'warn', `Rescan: primary models (${RESCAN_MODEL_POOL.map((x) => x.id).join(', ')}) exhausted on key ${lane.idx} — BACKUP model ${backupRm.id} (500 RPD) use ho raha hai`)
           }
 
-          addLog(scan, 'info', `Rescan: hunting short ${ts(g.shortStart)}–${ts(g.shortEnd)} inside full chunk ${c.chunkIndex} on ${rm.id} (key ${lane.idx})`)
-          const raw = await this.paceAndSend(job, lane, rm, shortDur + padBefore + padAfter + (chunkEnd - chunkStart), () => rescanRequest(lane.ai, rm.id, shortClip.uri, chunkUp.uri, rescanPadNote))
+          // CANDIDATE-FIRST HINT: chunk-mapping ne jo window claim ki thi, rescan
+          // ko batao ki pehle wahan (±10s) dekhe — boundaries aksar thodi shifted
+          // hoti hain. Hint galat bhi ho sakta hai isliye full scan phir bhi hota hai.
+          const hintLocalStart = Math.max(0, c.movieStart - chunkStart)
+          const hintLocalEnd = Math.max(0, c.movieEnd - chunkStart)
+          const rescanHintNote =
+            hintLocalEnd > hintLocalStart
+              ? `HINT — PEHLE YAHAN DEKHO: chunk-mapping ne Video 2 me ${ts(hintLocalStart)}–${ts(hintLocalEnd)} ke aas-paas match hone ka dawa kiya tha (verifier ne exact wahi window reject ki thi — boundaries galat ho sakti hain). PASS 1 me SABSE PEHLE is region ko ±10 second ke saath frame-by-frame check karo — sahi match aksar isi ke aas-paas thoda shift hua hota hai. LEKIN agar wahan exact match NA mile to poora Video 2 (audio samet) zaroor scan karo — hint galat bhi ho sakta hai.`
+              : undefined
+
+          addLog(scan, 'info', `Rescan: hunting short ${ts(g.shortStart)}–${ts(g.shortEnd)} inside full chunk ${c.chunkIndex} on ${rm.id} (key ${lane.idx})${rescanHintNote ? ` — hint region ${ts(hintLocalStart)}–${ts(hintLocalEnd)} pehle check hoga` : ''}`)
+          const raw = await this.paceAndSend(job, lane, rm, shortDur + padBefore + padAfter + (chunkEnd - chunkStart), () =>
+            this.sendWithClipBackup(
+              job,
+              lane,
+              chunkFile,
+              chunkUp.uri,
+              uploadedNames,
+              (uri) => rescanRequest(lane.ai, rm.id, shortClip.uri, uri, rescanPadNote, rescanHintNote),
+              `Rescan chunk ${c.chunkIndex} on ${rm.id} (key ${lane.idx})`,
+            ),
+          )
           const found = parseRescanMatch(raw)
           if (!found) {
             c.rescan = 'not_found'
@@ -1387,7 +1461,17 @@ class Scheduler {
         const rvm = pickVerifyModel()
         addLog(scan, 'info', `Re-verify rescan window movie ${ts(c.rescanMovieStart!)}–${ts(c.rescanMovieEnd!)}${needsPad ? ' (padded)' : ''} on ${rvm.id} (key ${lane.idx})`)
         const reSecs = shortDur + padBefore + padAfter + Math.max(1, c.rescanMovieEnd! - c.rescanMovieStart!) + padBefore + padAfter
-        const raw2 = await this.paceAndSend(job, lane, rvm, reSecs, () => verifyRequest(lane.ai, rvm.id, shortClip.uri, reUp.uri, verifyPadNote))
+        const raw2 = await this.paceAndSend(job, lane, rvm, reSecs, () =>
+          this.sendWithClipBackup(
+            job,
+            lane,
+            reFile,
+            reUp.uri,
+            uploadedNames,
+            (uri) => verifyRequest(lane.ai, rvm.id, shortClip.uri, uri, verifyPadNote),
+            `Re-verify rescan window on ${rvm.id} (key ${lane.idx})`,
+          ),
+        )
         const v2 = parseVerdict(raw2)
         if (!v2) throw new GeminiError('other', 'Verifier gave no clear VERDICT line (rescan window)')
 
