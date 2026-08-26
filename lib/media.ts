@@ -112,7 +112,20 @@ export async function finalizeUploadedMedia(
     if (msg.includes('binary not found') || msg.includes('ENOENT')) {
       return { ok: false, error: 'Video processing setup failed on the server. Please try again in a moment.' }
     }
-    return { ok: false, error: 'Could not read video file. Is it a valid video?' }
+    // A missing moov atom means the file was cut off mid-transfer (or is still
+    // downloading/syncing on the user's device) — the video itself may be fine.
+    if (msg.includes('moov atom not found')) {
+      return {
+        ok: false,
+        error: 'The file arrived incomplete (missing MP4 index). If it is syncing from cloud storage, wait for it to finish downloading, then upload again.',
+      }
+    }
+    // Surface the real ffprobe reason so "invalid video" errors are debuggable.
+    const detail = msg.replace(/^ffprobe exited \d+:\s*/i, '').split('\n').filter(Boolean).slice(-1)[0]?.slice(0, 200)
+    return {
+      ok: false,
+      error: `Could not read video file. Is it a valid video?${detail ? ` (${detail})` : ''}`,
+    }
   }
 
   if (kind === 'short') {

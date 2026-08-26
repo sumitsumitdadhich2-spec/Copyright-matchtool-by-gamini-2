@@ -25,15 +25,39 @@ async function run(binPromise: Promise<string>, args: string[], onStderr?: (line
 }
 
 export async function probeDuration(file: string): Promise<number> {
-  const out = await run(getFfprobePath(), [
-    '-v', 'error',
-    '-show_entries', 'format=duration',
-    '-of', 'csv=p=0',
-    file,
-  ])
-  const dur = Number.parseFloat(out.trim())
-  if (!Number.isFinite(dur) || dur <= 0) throw new Error('Could not determine video duration')
-  return dur
+  try {
+    const out = await run(getFfprobePath(), [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'csv=p=0',
+      file,
+    ])
+    const dur = Number.parseFloat(out.trim())
+    if (!Number.isFinite(dur) || dur <= 0) throw new Error('Could not determine video duration')
+    return dur
+  } catch (probeErr) {
+    // The bundled ffprobe (v4.0) is older than the bundled ffmpeg (v7.0) and
+    // can fail on newer codecs (e.g. AV1). Fall back to parsing ffmpeg's
+    // "Duration: HH:MM:SS.ss" stderr line before giving up.
+    const dur = await probeDurationViaFfmpeg(file)
+    if (dur !== null) return dur
+    throw probeErr
+  }
+}
+
+/** Fallback: read duration from `ffmpeg -i` stderr (works on codecs the old ffprobe can't parse). */
+async function probeDurationViaFfmpeg(file: string): Promise<number | null> {
+  let stderr = ''
+  try {
+    // `ffmpeg -i` with no output exits non-zero by design — capture stderr either way.
+    await run(getFfmpegPath(), ['-hide_banner', '-i', file], (line) => (stderr += line))
+  } catch (err) {
+    stderr += err instanceof Error ? err.message : String(err)
+  }
+  const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/)
+  if (!m) return null
+  const dur = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])
+  return Number.isFinite(dur) && dur > 0 ? dur : null
 }
 
 /** True when the file has at least one audio stream (silent movies need a synthesized track for concat). */

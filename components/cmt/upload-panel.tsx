@@ -56,35 +56,52 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
       try {
         const id = await ensureScan()
 
-        // Direct upload: the browser streams the file straight to the server,
-        // which saves it to local disk and immediately probes it with ffmpeg.
-        // No Blob round-trip — upload and processing start instantly.
-        await new Promise<void>((resolve, reject) => {
-          const xhr = new XMLHttpRequest()
-          xhr.open('POST', `/api/scans/${id}/upload?kind=${kind}&name=${encodeURIComponent(file.name)}`)
-          xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-              // Cap at 99 — server-side ffmpeg probe finishing is the real 100%.
-              setProgress(Math.min(99, Math.round((e.loaded / e.total) * 100)))
-            }
-          }
-          xhr.onload = () => {
-            if (xhr.status >= 200 && xhr.status < 300) {
-              resolve()
-            } else {
-              let msg = 'Upload failed. Please try again.'
-              try {
-                msg = (JSON.parse(xhr.responseText) as { error?: string }).error || msg
-              } catch {
-                // keep default
+        // Chunked upload: the file is sliced into small pieces sent one after
+        // another. A single giant POST gets silently truncated by proxies and
+        // serverless body-size limits — small chunks always get through, and
+        // each one is retried on transient network errors.
+        const CHUNK_BYTES = 4 * 1024 * 1024
+        const base = `/api/scans/${id}/upload?kind=${kind}&name=${encodeURIComponent(file.name)}&total=${file.size}`
+        let offset = 0
+        while (offset < file.size) {
+          const piece = file.slice(offset, Math.min(offset + CHUNK_BYTES, file.size))
+          let lastErr: Error | null = null
+          let sent = false
+          for (let attempt = 0; attempt < 3 && !sent; attempt++) {
+            if (attempt > 0) await new Promise((r) => setTimeout(r, 1000 * attempt))
+            try {
+              const res = await fetch(`${base}&offset=${offset}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: piece,
+              })
+              if (res.ok) {
+                sent = true
+              } else {
+                let msg = 'Upload failed. Please try again.'
+                try {
+                  msg = ((await res.json()) as { error?: string }).error || msg
+                } catch {
+                  // keep default
+                }
+                // Out-of-sync / bad-request errors won't fix themselves — stop retrying.
+                if (res.status >= 400 && res.status < 500) throw new Error(msg)
+                lastErr = new Error(msg)
               }
-              reject(new Error(msg))
+            } catch (err) {
+              if (err instanceof TypeError) {
+                // fetch network error — retry
+                lastErr = new Error('Upload failed — network error. Please try again.')
+              } else {
+                throw err
+              }
             }
           }
-          xhr.onerror = () => reject(new Error('Upload failed — network error. Please try again.'))
-          xhr.send(file)
-        })
+          if (!sent) throw lastErr ?? new Error('Upload failed. Please try again.')
+          offset += piece.size
+          // Cap at 99 — server-side ffmpeg probe finishing is the real 100%.
+          setProgress(Math.min(99, Math.round((offset / file.size) * 100)))
+        }
 
         setProgress(100)
         setUploading(null)
