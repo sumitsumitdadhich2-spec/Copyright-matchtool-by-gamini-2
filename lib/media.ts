@@ -85,8 +85,9 @@ export function invalidateUsageCache() {
 }
 
 // ---------- Post-upload finalize ----------
-// Runs after the browser uploaded the video straight to Blob and the file has
-// been pulled to /tmp: probe duration, set up segments/chunk state, cut scan copies.
+// Runs after the browser uploaded the video straight to the server (local
+// disk): probe duration, set up segments/chunk state, cut scan copies.
+// No Blob round-trip — ffmpeg works on the local file immediately.
 
 export async function finalizeUploadedMedia(
   scan: Scan,
@@ -94,8 +95,10 @@ export async function finalizeUploadedMedia(
   name: string,
 ): Promise<{ ok: true; duration: number; size: number } | { ok: false; error: string }> {
   const id = scan.id
-  const dest = await ensureLocalMedia(id, kind, true)
-  if (!dest) return { ok: false, error: 'Video not found in storage — upload may have failed. Please try again.' }
+  const dest = localMediaPath(id, kind)
+  if (!fs.existsSync(/*turbopackIgnore: true*/ dest) || fs.statSync(dest).size === 0) {
+    return { ok: false, error: 'Video not found on the server — upload may have failed. Please try again.' }
+  }
   const size = fs.statSync(/*turbopackIgnore: true*/ dest).size
   const mediaDir = scanMediaDir(id)
 
@@ -133,8 +136,8 @@ export async function finalizeUploadedMedia(
       scan,
       'info',
       segCount > 1
-        ? `Short video uploaded to Blob storage: ${name} (${fmtDur(duration)}) — scanned minute-by-minute (${segCount} segments), original preserved`
-        : `Short video uploaded to Blob storage: ${name} (${fmtDur(duration)}) — original preserved, scan copy cut in background`,
+        ? `Short video uploaded: ${name} (${fmtDur(duration)}) — scanned minute-by-minute (${segCount} segments), original preserved`
+        : `Short video uploaded: ${name} (${fmtDur(duration)}) — original preserved, scan copy cut in background`,
     )
     saveScan(scan, { immediate: true })
 
@@ -190,7 +193,7 @@ export async function finalizeUploadedMedia(
     addLog(
       scan,
       'info',
-      `Movie uploaded to Blob storage: ${name} (${fmtDur(duration)}) — select a trim range (optional) and confirm to start chunking`,
+      `Movie uploaded: ${name} (${fmtDur(duration)}) — select a trim range (optional) and confirm to start chunking`,
     )
   }
 

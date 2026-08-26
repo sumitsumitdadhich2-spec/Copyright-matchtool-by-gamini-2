@@ -1,17 +1,21 @@
 import { NextResponse } from 'next/server'
-import { handleUpload, type HandleUploadBody } from '@vercel/blob/client'
+import fs from 'node:fs'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { getScan, SCANS_DIR } from '@/lib/store'
 import { restoreScansFromBlob } from '@/lib/scan-blob'
-import { mediaBlobPath } from '@/lib/media'
+import { finalizeUploadedMedia, localMediaPath } from '@/lib/media'
 
 export const runtime = 'nodejs'
+export const maxDuration = 300
 
 /**
- * Token endpoint for DIRECT browser → Blob uploads (@vercel/blob/client).
- * The video never passes through this serverless function, so Vercel's 4.5MB
- * request-body limit and instance affinity don't matter — files of any size
- * land straight in Blob storage. After the upload completes the client calls
- * /upload/complete which pulls the file to /tmp and finalizes the scan state.
+ * DIRECT upload: the browser streams the raw video body straight to this
+ * route, which writes it to local disk. No Blob round-trip — ffmpeg starts
+ * on the local file immediately, so upload + processing are as fast as the
+ * network/disk allow.
+ *
+ * Query params: ?kind=short|movie&name=<original filename>
  */
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params
@@ -22,36 +26,36 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   }
   if (!scan) return NextResponse.json({ error: 'Scan not found' }, { status: 404 })
 
-  let body: HandleUploadBody
-  try {
-    body = (await req.json()) as HandleUploadBody
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  const url = new URL(req.url)
+  const kind = url.searchParams.get('kind')
+  const rawName = url.searchParams.get('name') || 'video.mp4'
+  const name = rawName.trim() || 'video.mp4'
+  if (kind !== 'short' && kind !== 'movie') {
+    return NextResponse.json({ error: 'kind must be short or movie' }, { status: 400 })
+  }
+  if (!req.body) {
+    return NextResponse.json({ error: 'Empty upload body' }, { status: 400 })
   }
 
-  const allowed = [mediaBlobPath(id, 'short'), mediaBlobPath(id, 'movie')]
-
+  // Stream the request body straight to disk (no memory buffering).
+  const dest = localMediaPath(id, kind)
+  const tmp = `${dest}.up-${process.pid}`
   try {
-    const json = await handleUpload({
-      body,
-      request: req,
-      onBeforeGenerateToken: async (pathname) => {
-        if (!allowed.includes(pathname)) {
-          throw new Error('Invalid upload path')
-        }
-        return {
-          allowedContentTypes: ['video/*', 'application/octet-stream'],
-          maximumSizeInBytes: 5 * 1024 * 1024 * 1024, // 5 GB per video
-          addRandomSuffix: false,
-          allowOverwrite: true,
-        }
-      },
-      // Production webhook — the client-driven /upload/complete does the real
-      // finalize (works in preview too, where this callback can't reach us).
-      onUploadCompleted: async () => {},
-    })
-    return NextResponse.json(json)
+    await pipeline(Readable.fromWeb(req.body as never), fs.createWriteStream(tmp))
+    fs.renameSync(tmp, dest)
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : 'Upload token failed' }, { status: 400 })
+    try {
+      if (fs.existsSync(/*turbopackIgnore: true*/ tmp)) fs.unlinkSync(tmp)
+    } catch {
+      // ignore cleanup failure
+    }
+    console.error('[upload] stream to disk failed:', err instanceof Error ? err.message : err)
+    return NextResponse.json({ error: 'Upload failed while saving the file. Please try again.' }, { status: 500 })
   }
+
+  // Probe with ffmpeg and set up segments / trim state right away.
+  const result = await finalizeUploadedMedia(scan, kind, name)
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: 400 })
+
+  return NextResponse.json({ ok: true, duration: result.duration, size: result.size })
 }
