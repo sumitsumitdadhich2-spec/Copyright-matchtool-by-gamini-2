@@ -36,6 +36,10 @@ export function TwelveLabsPanel({ scan }: { scan: Scan }) {
   const prefilter = data?.prefilter ?? scan.prefilter ?? null
   const movieReady = Boolean(scan.movieDuration) && !scan.awaitingTrim
 
+  // Key na ho (ya status abhi load ho raha ho) to section bilkul na dikhe —
+  // app 100% normal dikhta aur chalta hai. Key dalte hi section aa jata hai.
+  if (!data || !hasKey) return null
+
   async function startIndexing() {
     setStarting(true)
     setError(null)
