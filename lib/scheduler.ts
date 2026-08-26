@@ -1096,6 +1096,12 @@ class Scheduler {
       added++
     }
     if (added > 0) {
+      // CONFIDENCE ORDER (TwelveLabs): sabse zyada confident groups PEHLE verify
+      // hote hain (high→low) — pehle hi saare expected matches confirm hone ke
+      // chances badhte hain aur early-stop jaldi fire hota hai.
+      job.verifyQueue.sort((a, b) => this.groupConfidence(scan, groups[b]) - this.groupConfidence(scan, groups[a]))
+    }
+    if (added > 0) {
       addLog(
         scan,
         'info',
@@ -1299,6 +1305,9 @@ class Scheduler {
           g.confirmedViaRescan = false
           this.applyGroupResult(job, g)
           addLog(scan, 'success', `CONFIRMED: short ${ts(g.shortStart)}–${ts(g.shortEnd)} = movie ${ts(c.movieStart)}–${ts(c.movieEnd)} (verifier: ${vm.id})`)
+          // EARLY-STOP QUICK-CONFIRM: is chunk ka 1 segment SAME confirm hua —
+          // check karo ki current minute ke bache chunks ab skip ho sakte hain.
+          this.checkEarlyStop(job)
           return
         }
         addLog(scan, 'warn', `Verifier says DIFFERENT for movie ${ts(c.movieStart)}–${ts(c.movieEnd)}${g.candidates.length > i + 1 ? ' — checking next candidate' : ''}`)
@@ -1330,17 +1339,26 @@ class Scheduler {
           const chunkUp = await uploadVideo(lane.ai, chunkFile)
           uploadedNames.push(chunkUp.name)
 
-          // RESCAN is LOCKED to gemini-3-flash-preview / gemini-3.5-flash only —
-          // lite models give weak rescan results. Use the worker's own model when
-          // it is one of the two, otherwise pick an available rescan model on this key.
-          const rm = isRescanModel(m.id)
+          // RESCAN models: PRIMARY = gemini-3-flash-preview / gemini-3.5-flash.
+          // BACKUP = high-limit lite models (500 RPD each) — jab primaries ki
+          // daily limit khatam ho jaye to rescan lite pool par continue hota
+          // hai, kabhi rukta nahi. Use the worker's own model when it is a
+          // primary rescan model, otherwise pick primary first, then backup.
+          const primaryRm = isRescanModel(m.id)
             ? m
             : RESCAN_MODEL_POOL.find((x) => getModelUsage(x.id, lane.apiKey) < x.rpd)
+          const backupRm = primaryRm
+            ? null
+            : RESCAN_BACKUP_POOL.find((x) => getModelUsage(x.id, lane.apiKey) < x.rpd)
+          const rm = primaryRm || backupRm
           if (!rm) {
             throw new GeminiError(
               'other',
-              `Rescan models (${RESCAN_MODEL_POOL.map((x) => x.id).join(', ')}) exhausted on key ${lane.idx} — group re-queued for another key`,
+              `Rescan models (${[...RESCAN_MODEL_POOL, ...RESCAN_BACKUP_POOL].map((x) => x.id).join(', ')}) exhausted on key ${lane.idx} — group re-queued for another key`,
             )
+          }
+          if (backupRm) {
+            addLog(scan, 'warn', `Rescan: primary models (${RESCAN_MODEL_POOL.map((x) => x.id).join(', ')}) exhausted on key ${lane.idx} — BACKUP model ${backupRm.id} (500 RPD) use ho raha hai`)
           }
 
           addLog(scan, 'info', `Rescan: hunting short ${ts(g.shortStart)}–${ts(g.shortEnd)} inside full chunk ${c.chunkIndex} on ${rm.id} (key ${lane.idx})`)
@@ -1383,6 +1401,8 @@ class Scheduler {
           g.confirmedViaRescan = true
           this.applyGroupResult(job, g)
           addLog(scan, 'success', `CONFIRMED via rescan: short ${ts(g.shortStart)}–${ts(g.shortEnd)} = movie ${ts(c.rescanMovieStart!)}–${ts(c.rescanMovieEnd!)}`)
+          // EARLY-STOP QUICK-CONFIRM: rescan-confirm bhi count hota hai.
+          this.checkEarlyStop(job)
           return
         }
         addLog(scan, 'warn', `Rescan window rejected by verifier — final DIFFERENT for candidate ${i} (chunk ${c.chunkIndex})`)
@@ -1392,6 +1412,9 @@ class Scheduler {
       g.status = 'rejected'
       this.applyGroupResult(job, g)
       addLog(scan, 'error', `REJECTED (final): short ${ts(g.shortStart)}–${ts(g.shortEnd)} — every candidate and rescan failed verification, removed from matches`)
+      // EARLY-STOP SAFETY: is short window ki coverage toot gayi to us minute
+      // ke early-stop-skipped chunks wapas scan queue me daalo (accuracy first).
+      this.reviveEarlyStopSkipped(job, g)
       this.mark(job)
     } finally {
       for (const n of uploadedNames) void deleteFileQuiet(lane.ai, n)
@@ -1530,6 +1553,10 @@ class Scheduler {
       this.mark(job)
 
       let chunkFileName: string | null = null
+      /** consumed backup uploads (deleted in finally) */
+      const backupNames: string[] = []
+      /** pending unused backup upload (deleted in finally if still set) */
+      let pendingBackup: Promise<{ uri: string; name: string }> | null = null
       try {
         // PARALLEL UPLOADS: the short-minute segment + THIS movie chunk upload
         // AT THE SAME TIME (Promise.all) — and the per-model pacing wait
@@ -1560,6 +1587,20 @@ class Scheduler {
         const [shortUri, uploaded] = await uploadsP
         chunkFileName = uploaded.name
 
+        // BACKUP UPLOAD (API-busy insurance): isi chunk ki EK aur copy background
+        // me upload hoti hai. Agar request "busy/overloaded" fail ho to dobara
+        // upload ka time waste kiye BINA turant backup URI se new request jaati
+        // hai — aur retry ke dauran agla backup bhi ban jaata hai. Result aate
+        // hi saare unused backups delete ho jaate hain (Files API clean rahta hai).
+        const startBackup = () => {
+          pendingBackup = (async () => {
+            const file = await this.ensureChunkFile(scan, chunkIndex)
+            return uploadVideo(lane.ai, file)
+          })()
+          pendingBackup.catch(() => {})
+        }
+        startBackup()
+
         job.nextFreeAt[rk] = Date.now() + MODEL_MIN_INTERVAL_MS
         const used = incrementModelUsage(m.id, lane.apiKey)
         st.usedToday = used
@@ -1570,7 +1611,32 @@ class Scheduler {
         // cut + upload runs in the background — analysis khatam hote hi agla
         // segment ready milta hai, wait zero.
         this.prefetchNextChunks(job, lane)
-        const raw = await mapChunkRequest(lane.ai, m.id, shortUri, uploaded.uri)
+        let raw: string
+        try {
+          raw = await mapChunkRequest(lane.ai, m.id, shortUri, uploaded.uri)
+        } catch (reqErr) {
+          // TRANSIENT-BUSY RETRY: API/model busy (overloaded / 5xx / rate) par
+          // pehle se ready BACKUP upload se TURANT ek new request — zero upload wait.
+          const re = classifyError(reqErr)
+          const transient =
+            re.kind === 'rate' || /overload|busy|503|500|internal|try again|temporarily/i.test(re.message)
+          const backup = transient && pendingBackup ? await (pendingBackup as Promise<{ uri: string; name: string }>).catch(() => null) : null
+          if (!backup) throw reqErr
+          pendingBackup = null
+          backupNames.push(backup.name)
+          addLog(scan, 'warn', `${minutePrefix}Chunk ${chunkIndex}: API busy on ${m.id} (key ${lane.idx}) — pre-uploaded BACKUP se turant retry (upload wait zero)`)
+          this.mark(job)
+          // Retry ke dauran agla backup bhi taiyaar — dobara busy aaye to bhi ready.
+          startBackup()
+          raw = await mapChunkRequest(lane.ai, m.id, shortUri, backup.uri)
+        }
+        // Result mil gaya — bacha hua unused backup ab zaroori nahi, delete.
+        if (pendingBackup) {
+          void (pendingBackup as Promise<{ uri: string; name: string }>)
+            .then((f) => deleteFileQuiet(lane.ai, f.name))
+            .catch(() => {})
+          pendingBackup = null
+        }
         this.recordChunkOutput(chunk, m.id, raw)
 
         // Model timestamps are LOCAL to the 1-minute segment file — shift them by
@@ -1641,6 +1707,13 @@ class Scheduler {
       } finally {
         // The short video is reused across chunks; the chunk upload is one-shot.
         if (chunkFileName) void deleteFileQuiet(lane.ai, chunkFileName)
+        // Backup uploads: used copies + any still-pending unused copy — sab delete.
+        for (const n of backupNames) void deleteFileQuiet(lane.ai, n)
+        if (pendingBackup) {
+          void (pendingBackup as Promise<{ uri: string; name: string }>)
+            .then((f) => deleteFileQuiet(lane.ai, f.name))
+            .catch(() => {})
+        }
         job.inFlight.delete(chunkIndex)
         st.currentChunk = null
         if (st.state === 'active') st.state = 'idle'
