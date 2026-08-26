@@ -1,7 +1,6 @@
 'use client'
 
 import { useRef, useState, type DragEvent } from 'react'
-import { upload } from '@vercel/blob/client'
 import { Film, Clapperboard, Loader2, CheckCircle2 } from 'lucide-react'
 import type { Scan } from '@/lib/types'
 import { fmtTime, fmtBytes } from '@/lib/format'
@@ -57,35 +56,35 @@ export function UploadPanel({ scan, selectedScanId, onScanCreated, refresh }: Pr
       try {
         const id = await ensureScan()
 
-        // Direct browser → Blob upload: the video never passes through a
-        // serverless function, so Vercel's 4.5MB body limit doesn't apply.
-        await upload(`media/${id}/${kind}.mp4`, file, {
-          access: 'private',
-          handleUploadUrl: `/api/scans/${id}/upload`,
-          contentType: file.type || 'application/octet-stream',
-          multipart: true,
-          onUploadProgress: ({ percentage }) => {
-            // Cap at 99 — the finalize step below is the real 100%.
-            setProgress(Math.min(99, Math.round(percentage)))
-          },
-        })
-
-        // Finalize: server pulls the video from Blob, probes it with ffmpeg
-        // and sets up segments / trim state.
-        const res = await fetch(`/api/scans/${id}/upload/complete`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind, name: file.name }),
-        })
-        if (!res.ok) {
-          let msg = 'Upload finished but processing failed. Please try again.'
-          try {
-            msg = ((await res.json()) as { error?: string }).error || msg
-          } catch {
-            // keep default
+        // Direct upload: the browser streams the file straight to the server,
+        // which saves it to local disk and immediately probes it with ffmpeg.
+        // No Blob round-trip — upload and processing start instantly.
+        await new Promise<void>((resolve, reject) => {
+          const xhr = new XMLHttpRequest()
+          xhr.open('POST', `/api/scans/${id}/upload?kind=${kind}&name=${encodeURIComponent(file.name)}`)
+          xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream')
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              // Cap at 99 — server-side ffmpeg probe finishing is the real 100%.
+              setProgress(Math.min(99, Math.round((e.loaded / e.total) * 100)))
+            }
           }
-          throw new Error(msg)
-        }
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve()
+            } else {
+              let msg = 'Upload failed. Please try again.'
+              try {
+                msg = (JSON.parse(xhr.responseText) as { error?: string }).error || msg
+              } catch {
+                // keep default
+              }
+              reject(new Error(msg))
+            }
+          }
+          xhr.onerror = () => reject(new Error('Upload failed — network error. Please try again.'))
+          xhr.send(file)
+        })
 
         setProgress(100)
         setUploading(null)
