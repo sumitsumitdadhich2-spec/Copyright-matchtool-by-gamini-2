@@ -526,6 +526,49 @@ class Scheduler {
     }
   }
 
+  /** NEXT-MINUTE BACKGROUND PREP: while minute N is being scanned/verified,
+   *  get minute N+1 fully ready in the background so it starts with ZERO wait:
+   *  1) cut minute N+1's short-segment file + upload it to Gemini on EVERY key
+   *     lane (the big serial cost between minutes),
+   *  2) pre-cut minute N+1's pending movie-chunk files locally (free, no API).
+   *  Everything is cached (segUris / chunk files on disk), so even if the scan
+   *  stops, Resume picks the prepared work right back up. All failures are
+   *  silent — the normal on-demand path re-does anything that failed. */
+  private prepareNextSegment(job: Job, segments: ShortSegmentState[], currentIndex: number) {
+    if (job.stopping) return
+    const next = segments.find(
+      (s) =>
+        s.index > currentIndex &&
+        s.selected !== false &&
+        s.chunks.some((c) => c.status === 'pending'),
+    )
+    if (!next) return
+    // Segment upload on every lane (kept in segUris cache — reused, never deleted).
+    let announced = false
+    for (const lane of job.lanes) {
+      if (lane.segUris.has(next.index) || lane.segUriPromises.has(next.index)) continue
+      if (!announced) {
+        announced = true
+        addLog(job.scan, 'info', `Pipeline: minute ${next.index + 1} background me ready ho raha hai (segment upload + chunk cutting) — minute ${currentIndex + 1} complete hote hi turant start hoga`)
+        this.mark(job)
+      }
+      void this.ensureSegmentUri(job, lane, next).catch(() => {})
+    }
+    // Pre-cut the next minute's pending chunk files locally (ffmpeg only, no API
+    // quota). Sequential to keep CPU/disk pressure low while the scan runs.
+    const pendingIdx = next.chunks.filter((c) => c.status === 'pending').map((c) => c.index)
+    void (async () => {
+      for (const ci of pendingIdx) {
+        if (job.stopping) return
+        try {
+          await this.ensureChunkFile(job.scan, ci)
+        } catch {
+          /* silent — on-demand path re-cuts when the chunk's turn comes */
+        }
+      }
+    })()
+  }
+
   // ---------- Twelve Labs pre-filter (optional, accuracy-first) ----------
 
   /** OPTIONAL embedding pre-filter. Runs ONLY when the user's Twelve Labs key
@@ -689,6 +732,11 @@ class Scheduler {
         )
         this.mark(job)
 
+        // NEXT-MINUTE PREP (fire-and-forget): while THIS minute scans, the
+        // next selected minute's segment upload + chunk cutting run in the
+        // background so the next pass starts instantly.
+        this.prepareNextSegment(job, segments, seg.index)
+
         // CHUNK PIPELINE: one worker per (key lane × CHUNK model) — these
         // workers ONLY do chunk mapping, never verification.
         const chunkWorkers: Promise<void>[] = []
@@ -717,6 +765,8 @@ class Scheduler {
         await Promise.all([chunkPhase, ...verifyWorkers])
       } else {
         // Nothing to map for this minute — verification-only pass.
+        // Next minute still preps in the background during verification.
+        this.prepareNextSegment(job, segments, seg.index)
         job.chunkPhaseDone = true
         this.enqueueNewGroups(job)
         if (job.verifyQueue.length > 0 || job.verifyInFlight.size > 0) {

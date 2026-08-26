@@ -185,6 +185,71 @@ export function cleanupSegments(outDir: string) {
   }
 }
 
+/** Probe video width/height (first video stream). */
+export async function probeResolution(file: string): Promise<{ width: number; height: number } | null> {
+  try {
+    const out = await run(getFfprobePath(), [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height',
+      '-of', 'csv=p=0',
+      file,
+    ])
+    const [w, h] = out.trim().split(/[,\s]+/).map((v) => Number.parseInt(v, 10))
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) return { width: w, height: h }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Twelve Labs upload requirements: aspect ratio between 1:1 and 2.4:1 and
+ * at least 360px on each side. If the source violates either rule, write a
+ * padded/scaled COPY (black bars — content untouched) and return its path.
+ * If the source is already valid (or probing fails), return null and the
+ * caller uploads the original file as-is.
+ */
+export async function normalizeForTwelveLabs(sourceFile: string): Promise<string | null> {
+  const res = await probeResolution(sourceFile)
+  if (!res) return null
+  let { width: w, height: h } = res
+  const MIN_SIDE = 360
+  // Slightly inside the limits so rounding can never tip us back over.
+  const MAX_AR = 2.35
+  const MIN_AR = 1.0
+
+  let targetW = w
+  let targetH = h
+  // Too wide (like 1280x532 = 2.41:1) => pad height. Too tall => pad width.
+  if (w / h > MAX_AR) targetH = Math.ceil(w / MAX_AR)
+  else if (w / h < MIN_AR) targetW = h
+  // Enforce minimum 360px on each side (scale up keeping the padded ratio).
+  if (Math.min(targetW, targetH) < MIN_SIDE) {
+    const scale = MIN_SIDE / Math.min(targetW, targetH)
+    targetW = Math.ceil(targetW * scale)
+    targetH = Math.ceil(targetH * scale)
+  }
+  // ffmpeg needs even dimensions for yuv420p.
+  targetW += targetW % 2
+  targetH += targetH % 2
+
+  // Already valid (nothing changed) — upload the original untouched.
+  if (targetW === w && targetH === h) return null
+
+  const outFile = `${sourceFile}.tl-normalized.mp4`
+  if (fs.existsSync(outFile)) return outFile // cached from a previous attempt
+  await run(getFfmpegPath(), [
+    '-y',
+    '-i', sourceFile,
+    '-vf', `scale=${targetW}:-2:force_original_aspect_ratio=decrease,pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:black`,
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26',
+    '-c:a', 'aac', '-b:a', '96k',
+    outFile,
+  ])
+  return outFile
+}
+
 // ---------- Render/export helpers (used by lib/render.ts) ----------
 
 /** Absolute path to a runnable ffmpeg binary (render pipeline spawns its own process for kill support). */

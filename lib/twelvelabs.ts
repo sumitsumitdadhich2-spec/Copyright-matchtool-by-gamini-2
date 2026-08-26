@@ -5,6 +5,7 @@ import path from 'node:path'
 import { openAsBlob } from 'node:fs'
 import { put, get } from '@vercel/blob'
 import { scanMediaDir } from './store'
+import { normalizeForTwelveLabs } from './ffmpeg'
 import { CHUNK_SECONDS } from './models'
 import type { Scan, ShortSegmentState } from './types'
 
@@ -105,10 +106,21 @@ export async function createIndexTask(
   indexId: string,
   filePath: string,
 ): Promise<{ taskId: string; videoId: string | null }> {
+  // TL rejects videos outside 1:1–2.4:1 aspect ratio or under 360px/side.
+  // Auto-fix by uploading a padded COPY (black bars) — the original file and
+  // the Gemini scan pipeline are never touched. Normalize failure is silent:
+  // we upload the original and let TL report its own error if any.
+  let uploadPath = filePath
+  try {
+    const normalized = await normalizeForTwelveLabs(filePath)
+    if (normalized) uploadPath = normalized
+  } catch {
+    // padding failed — try the original as-is
+  }
   const form = new FormData()
   form.append('index_id', indexId)
-  const blob = await openAsBlob(filePath)
-  form.append('video_file', blob, path.basename(filePath))
+  const blob = await openAsBlob(uploadPath)
+  form.append('video_file', blob, path.basename(uploadPath))
   const res = (await tlFetch(apiKey, '/tasks', { method: 'POST', body: form })) as {
     _id?: string
     id?: string
