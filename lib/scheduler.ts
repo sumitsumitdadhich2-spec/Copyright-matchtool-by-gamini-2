@@ -7,6 +7,7 @@ import {
   CHUNK_MODEL_POOL,
   VERIFY_MODEL_POOL,
   RESCAN_MODEL_POOL,
+  RESCAN_BACKUP_POOL,
   isRescanModel,
   PADDED_VERIFY_MODEL_POOL,
   isPaddedVerifyModel,
@@ -190,12 +191,16 @@ class Scheduler {
       for (const c of seg.chunks) {
         const inRange = chunkOverlapsSegRange(scan, seg, c.index)
         if (c.status === 'scanning') c.status = 'pending'
-        // 'cancelled' is ONLY ever set by skip logic (range or pre-filter), so
-        // ALWAYS revive cancelled chunks that fall inside the CURRENT range — on
-        // fresh starts too, not just Resume. Otherwise changing a minute's
-        // movie range after a run leaves the newly chosen part permanently
-        // skipped (it was cancelled under the OLD range and never re-queued).
-        if (c.status === 'cancelled' && inRange) c.status = 'pending'
+        // 'cancelled' is ONLY ever set by skip logic (range, pre-filter, or
+        // EARLY-STOP), so revive cancelled chunks that fall inside the CURRENT
+        // range — on fresh starts too, not just Resume. Otherwise changing a
+        // minute's movie range after a run leaves the newly chosen part
+        // permanently skipped. EXCEPTION: early-stop-skipped chunks of a DONE
+        // minute stay skipped — us minute ke saare matches confirm ho chuke hain.
+        if (c.status === 'cancelled' && inRange && !(c.skippedEarlyStop && seg.status === 'done')) {
+          c.status = 'pending'
+          delete c.skippedEarlyStop
+        }
         if (c.status === 'pending' && !inRange) c.status = 'cancelled'
         // Re-apply the persisted pre-filter selection (resume path). A fresh
         // pre-filter run inside runScan() recomputes/overrides this anyway.
@@ -589,6 +594,8 @@ class Scheduler {
     const fullScan = (reason: string, attempted: boolean) => {
       for (const seg of allSegs) {
         if (Array.isArray(seg.prefilterChunks)) delete seg.prefilterChunks
+        delete seg.chunkConfidence
+        delete seg.tlWindows
         for (const c of seg.chunks) {
           if (c.status === 'cancelled' && chunkOverlapsSegRange(scan, seg, c.index)) c.status = 'pending'
         }
@@ -633,7 +640,7 @@ class Scheduler {
         addLog(scan, 'success', `Twelve Labs pre-filter: short ke ${segs.length} segment embedding(s) ready (cached for resume)`)
       }
 
-      // 3) Cosine-similarity matching (threshold 0.75, ±1 buffer chunks).
+      // 3) Cosine-similarity matching (threshold 0.82, ±1 buffer chunks).
       const result = computePrefilterChunks(scan, selectedSegs, shortEmb.segments, movieEmb.segments)
       if (!result.perSegment) {
         // ACCURACY RULE: some short segment matched nowhere — never trust the

@@ -18,27 +18,31 @@ export const CHUNK_MODEL_POOL: ModelSpec[] = [
   { id: 'gemini-3.7-flash', rpm: 5, rpd: 20 },
 ]
 
-/** VERIFY / RESCAN models: every other available model. Used for candidate
- * verification, rescans, and re-verification — NEVER for chunk mapping.
- * gemini-2.5-flash and gemini-2.5-flash-lite are RETIRED (no longer available). */
+/** VERIFY models (locked): gemini-3.5-flash-lite + gemini-3.1-flash-lite ONLY.
+ * Dono ki daily limit bahut high hai (500 RPD each) — 10 API keys ke saath
+ * dono models ek saath parallel me verify karte hain. NEVER for chunk mapping. */
 export const VERIFY_MODEL_POOL: ModelSpec[] = [
-  { id: 'gemini-flash-lite-latest', rpm: 15, rpd: 500 },
+  { id: 'gemini-3.5-flash-lite', rpm: 15, rpd: 500 },
   { id: 'gemini-3.1-flash-lite', rpm: 15, rpd: 500 },
-  { id: 'gemini-3.5-flash', rpm: 5, rpd: 20 },
-  { id: 'gemini-3-flash-preview', rpm: 5, rpd: 20 },
-  { id: 'gemini-3.5-flash-lite', rpm: 10, rpd: 20 },
 ]
 
-/** RESCAN models (locked): ONLY gemini-3-flash-preview and gemini-3.5-flash are
- * allowed to run rescan requests (full-chunk segment hunt). Lite models give
- * weak rescan results, so they are BANNED from this phase. Thinking level HIGH
- * and max output tokens apply globally to every request (see GEN_CONFIG). */
+/** RESCAN models (primary): gemini-3-flash-preview and gemini-3.5-flash run
+ * rescan requests (full-chunk segment hunt). Thinking level HIGH and max
+ * output tokens apply globally to every request (see GEN_CONFIG). */
 export const RESCAN_MODEL_POOL: ModelSpec[] = [
   { id: 'gemini-3-flash-preview', rpm: 5, rpd: 20 },
   { id: 'gemini-3.5-flash', rpm: 5, rpd: 20 },
 ]
 
-/** Is this model one of the two locked rescan models? */
+/** RESCAN BACKUP models: jab primary rescan models (3-flash-preview / 3.5-flash)
+ * ki daily limit khatam ho jaye, to rescan in HIGH-LIMIT lite models par
+ * fallback karta hai (500 RPD each) — rescan kabhi ruke nahi. */
+export const RESCAN_BACKUP_POOL: ModelSpec[] = [
+  { id: 'gemini-3.5-flash-lite', rpm: 15, rpd: 500 },
+  { id: 'gemini-3.1-flash-lite', rpm: 15, rpd: 500 },
+]
+
+/** Is this model one of the primary rescan models? */
 export function isRescanModel(id: string): boolean {
   return RESCAN_MODEL_POOL.some((m) => m.id === id)
 }
@@ -51,7 +55,7 @@ export function isRescanModel(id: string): boolean {
 export const PADDED_VERIFY_MODEL_POOL: ModelSpec[] = [
   { id: 'gemini-3-flash-preview', rpm: 5, rpd: 20 },
   { id: 'gemini-3.5-flash', rpm: 5, rpd: 20 },
-  { id: 'gemini-3.5-flash-lite', rpm: 10, rpd: 20 },
+  { id: 'gemini-3.5-flash-lite', rpm: 15, rpd: 500 },
 ]
 
 /** Is this model allowed to verify PADDED clips? */
@@ -65,8 +69,15 @@ export function displayModelName(id: string): string {
   return id.replace('gemini-', '').replace(/flash/gi, 'shiva')
 }
 
-/** Full pool (chunk + verify) — used by the UI model board and reports. */
-export const MODEL_POOL: ModelSpec[] = [...CHUNK_MODEL_POOL, ...VERIFY_MODEL_POOL]
+/** Full pool (chunk + verify + rescan + backups, de-duplicated) — used by the
+ * UI model board and reports. */
+export const MODEL_POOL: ModelSpec[] = [
+  ...CHUNK_MODEL_POOL,
+  ...VERIFY_MODEL_POOL,
+  ...RESCAN_MODEL_POOL,
+  ...RESCAN_BACKUP_POOL,
+  ...PADDED_VERIFY_MODEL_POOL,
+].filter((m, i, arr) => arr.findIndex((x) => x.id === m.id) === i)
 
 /** Is this model one of the two locked chunk-map models? */
 export function isChunkModel(id: string): boolean {
