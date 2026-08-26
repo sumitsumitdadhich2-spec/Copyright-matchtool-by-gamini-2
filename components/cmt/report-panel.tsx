@@ -15,6 +15,17 @@ export function ReportPanel({ scan }: { scan: Scan }) {
       <div className="flex items-center gap-2">
         <FileCheck2 className="size-4 text-success" aria-hidden />
         <h2 className="text-sm font-semibold">Final Report</h2>
+        {/* How the chunk set was chosen: Twelve Labs pre-filtered vs normal full scan */}
+        {report.prefilterMode === 'twelvelabs' ? (
+          <span className="ml-auto rounded-full border border-primary/30 bg-primary/15 px-2.5 py-0.5 text-xs font-medium text-primary">
+            Twelve Labs pre-filtered
+            {report.prefilterSelected != null && report.prefilterTotal != null
+              ? ` · ${report.prefilterSelected}/${report.prefilterTotal} chunks`
+              : ''}
+          </span>
+        ) : (
+          <span className="ml-auto rounded-full bg-secondary px-2.5 py-0.5 text-xs text-muted-foreground">Full scan</span>
+        )}
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">

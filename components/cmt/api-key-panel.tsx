@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import useSWR from 'swr'
-import { KeyRound, Check, ShieldCheck, X } from 'lucide-react'
+import { KeyRound, Check, ShieldCheck, X, Layers } from 'lucide-react'
 import { fetcher } from '@/lib/format'
 
 interface KeySlot {
@@ -14,6 +14,7 @@ interface KeySlot {
 interface SettingsResponse {
   keys: KeySlot[]
   maxKeys: number
+  twelveLabs?: { hasKey: boolean; maskedKey: string | null }
 }
 
 const MAX_SLOTS = 20
@@ -30,8 +31,52 @@ export function ApiKeyPanel() {
   const [removing, setRemoving] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  const [tlValue, setTlValue] = useState('')
+  const [tlBusy, setTlBusy] = useState(false)
+  const [tlSaved, setTlSaved] = useState(false)
+
   const slots: KeySlot[] =
     data?.keys ?? Array.from({ length: MAX_SLOTS }, (_, i) => ({ index: i + 1, hasKey: false, maskedKey: null }))
+  const tl = data?.twelveLabs ?? { hasKey: false, maskedKey: null }
+
+  async function saveTl() {
+    const v = tlValue.trim()
+    if (!v) return
+    setTlBusy(true)
+    setError(null)
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ twelveLabsKey: v }),
+    })
+    setTlBusy(false)
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}))
+      setError(j.error || 'Failed to save Twelve Labs key')
+      return
+    }
+    setTlValue('')
+    setTlSaved(true)
+    setTimeout(() => setTlSaved(false), 2500)
+    void mutate()
+  }
+
+  async function removeTl() {
+    setTlBusy(true)
+    setError(null)
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clearTwelveLabs: true }),
+    })
+    setTlBusy(false)
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}))
+      setError(j.error || 'Failed to remove Twelve Labs key')
+      return
+    }
+    void mutate()
+  }
 
   async function save(n: number) {
     const v = (values[n] || '').trim()
@@ -135,6 +180,60 @@ export function ApiKeyPanel() {
           </div>
         )
       })}
+
+      {/* ---- Twelve Labs API key (OPTIONAL pre-filter) ---- */}
+      <div className="mt-4 border-t border-border pt-4">
+        <div className="flex items-center gap-2">
+          <Layers className="size-4 text-primary" aria-hidden />
+          <h2 className="text-sm font-semibold">Twelve Labs API Key — Pre-Filter (optional)</h2>
+          {tl.hasKey ? (
+            <span className="ml-auto flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 font-mono text-xs text-success">
+              <Check className="size-3" aria-hidden />
+              {tl.maskedKey}
+            </span>
+          ) : (
+            <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 text-xs text-muted-foreground">not set</span>
+          )}
+        </div>
+        <div className="mt-3 flex gap-2">
+          <input
+            type="password"
+            value={tlValue}
+            onChange={(e) => setTlValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) saveTl()
+            }}
+            placeholder={tl.hasKey ? 'Paste a new key to replace' : 'Paste your Twelve Labs API key (optional)'}
+            aria-label="Twelve Labs API key"
+            className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 font-mono text-sm outline-none focus:ring-2 focus:ring-ring"
+          />
+          <button
+            type="button"
+            onClick={() => saveTl()}
+            disabled={tlBusy || !tlValue.trim()}
+            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40"
+          >
+            {tlBusy ? 'Saving...' : tlSaved ? 'Saved' : tl.hasKey ? 'Update' : 'Save'}
+          </button>
+          {tl.hasKey && (
+            <button
+              type="button"
+              onClick={() => removeTl()}
+              disabled={tlBusy}
+              aria-label="Remove Twelve Labs API key"
+              title="Remove Twelve Labs key"
+              className="rounded-md border border-border px-2.5 py-2 text-sm text-muted-foreground hover:text-destructive disabled:opacity-40"
+            >
+              <X className="size-4" aria-hidden />
+            </button>
+          )}
+        </div>
+        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+          Optional speed-up: movie ko Twelve Labs par index karke sirf matching chunks Gemini ko bheje jaate hain. Key
+          khali ho to app bilkul normal full scan par chalta hai — Gemini system par ZERO asar. Koi bhi Twelve Labs error
+          = automatic full scan (scan kabhi fail nahi hota).
+        </p>
+      </div>
 
       <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
         Add 1 to 20 keys — the scan works with ANY number. All keys scan chunks in parallel first, then all keys run 24fps

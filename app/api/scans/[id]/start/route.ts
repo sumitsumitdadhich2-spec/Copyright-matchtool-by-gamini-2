@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { scheduler } from '@/lib/scheduler'
 import { getSession } from '@/lib/users'
-import { getAllUserApiKeys } from '@/lib/user-keys'
+import { getAllUserApiKeys, getUserTwelveLabsKey } from '@/lib/user-keys'
 import { deductTokens, refundTokens, SCAN_TOKEN_COST } from '@/lib/tokens'
 
 export const runtime = 'nodejs'
@@ -43,7 +43,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     charged = true
   }
 
-  const result = await scheduler.start(id, resume, userApiKeys)
+  // OPTIONAL Twelve Labs key: enables the embedding pre-filter when set.
+  // Missing key = pre-filter fully off — the scan runs exactly as before.
+  const tlKey = await getUserTwelveLabsKey(session.username)
+
+  const result = await scheduler.start(id, resume, userApiKeys, tlKey)
   if (!result.ok) {
     // Scan didn't start — give the tokens back.
     if (charged) await refundTokens(session.username, SCAN_TOKEN_COST)

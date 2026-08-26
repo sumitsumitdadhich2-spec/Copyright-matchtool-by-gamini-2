@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { scheduler } from '@/lib/scheduler'
 import { getSession } from '@/lib/users'
-import { getAllUserApiKeys } from '@/lib/user-keys'
+import { getAllUserApiKeys, getUserTwelveLabsKey } from '@/lib/user-keys'
 
 export const runtime = 'nodejs'
 
@@ -29,6 +29,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // PER-USER KEYS: retry runs on the logged-in user's own keys (needed when the
   // retry has to restart a finished scan in resume mode).
   const userApiKeys = await getAllUserApiKeys(session.username)
-  const result = await scheduler.retryChunk(id, chunkIndex, segmentIndex, userApiKeys)
+  // Optional Twelve Labs key: keeps the pre-filter selection alive when a
+  // retry has to restart a finished scan in resume mode.
+  const tlKey = await getUserTwelveLabsKey(session.username)
+  const result = await scheduler.retryChunk(id, chunkIndex, segmentIndex, userApiKeys, tlKey)
   return NextResponse.json(result, { status: result.ok ? 200 : 400 })
 }

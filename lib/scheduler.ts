@@ -307,6 +307,7 @@ class Scheduler {
     chunkIndex: number,
     segmentIndex?: number,
     userApiKeys?: string[],
+    tlApiKey?: string | null,
   ): Promise<{ ok: boolean; error?: string }> {
     const job = this.jobs.get(scanId)
     const scan = job ? job.scan : getScan(scanId)
@@ -385,7 +386,7 @@ class Scheduler {
     // using the SAME user's own keys that were passed in.
     if (scan.status === 'done' || scan.status === 'stopped' || scan.status === 'error') scan.status = 'stopped'
     saveScan(scan)
-    return this.start(scanId, true, userApiKeys)
+    return this.start(scanId, true, userApiKeys, tlApiKey)
   }
 
   private mark(job: Job) {

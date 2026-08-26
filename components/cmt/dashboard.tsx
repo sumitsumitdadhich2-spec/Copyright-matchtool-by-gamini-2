@@ -10,6 +10,7 @@ import { UsersDialog } from '@/components/auth/users-dialog'
 import { TokenBadge, TokensExhaustedBanner, useTokens } from './token-badge'
 import { SettingsDialog } from './settings-dialog'
 import { UploadPanel } from './upload-panel'
+import { TwelveLabsPanel } from './twelve-labs-panel'
 import { TrimPanel } from './trim-panel'
 import { MinuteSelectPanel } from './minute-select-panel'
 import { ScanTimeline } from './scan-timeline'
@@ -210,6 +211,8 @@ export function Dashboard() {
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="flex flex-col gap-4 lg:col-span-2">
+          {/* SEPARATE optional Twelve Labs pre-filter section — app me sabse upar */}
+          {scan && <TwelveLabsPanel scan={scan} />}
           <UploadPanel scan={scan} selectedScanId={scanId} onScanCreated={(id) => setScanId(id)} refresh={() => void mutate()} />
           {scan && scan.awaitingTrim && scan.movieDuration && scan.status !== 'chunking' && (
             <TrimPanel scan={scan} refresh={() => void mutate()} />
