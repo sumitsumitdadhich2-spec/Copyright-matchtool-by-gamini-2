@@ -82,9 +82,15 @@ export function RenderPanel({ scan }: { scan: Scan }) {
     }
   }
 
-  /** Same-origin fetch → Blob → programmatic <a download> click. NEVER uses
-   *  window.open or a direct top-level navigation to the API route (that path
-   *  gets blocked by preview auth with an "Unauthorized" redirect). */
+  /** Same-origin fetch → save to disk. NEVER uses window.open or a direct
+   *  top-level navigation to the API route (that path gets blocked by preview
+   *  auth with an "Unauthorized" redirect).
+   *
+   *  CRASH FIX: big MP4s assembled as an in-memory Blob crashed the tab right
+   *  at the end of the download. When the browser supports the File System
+   *  Access API (Chrome/Edge), the file now streams DIRECTLY to disk chunk by
+   *  chunk — zero RAM buildup. The Blob path stays as the fallback for other
+   *  browsers. */
   async function downloadRender() {
     if (downloading) return
     setDownloading(true)
@@ -93,6 +99,62 @@ export function RenderPanel({ scan }: { scan: Scan }) {
     setDownloadedBytes(0)
     let objectUrl: string | null = null
     try {
+      const baseName = (scan.movieName || 'render').replace(/\.[^.]+$/, '')
+      const fileName = `${baseName}-stitched-${job?.settings?.resolution || 'export'}.mp4`.replace(/[^\w.\- ]+/g, '_')
+
+      // STREAM-TO-DISK path (no memory blob — big files safe).
+      const picker = (window as unknown as { showSaveFilePicker?: (opts: unknown) => Promise<FileSystemFileHandle> })
+        .showSaveFilePicker
+      if (typeof picker === 'function') {
+        let handle: FileSystemFileHandle | null = null
+        try {
+          handle = await picker({
+            suggestedName: fileName,
+            types: [{ description: 'MP4 video', accept: { 'video/mp4': ['.mp4'] } }],
+          })
+        } catch (err) {
+          // User cancelled the save dialog — not an error.
+          if ((err as Error)?.name === 'AbortError') return
+          handle = null // picker unusable (e.g. cross-origin iframe) — fall through to blob path
+        }
+        if (handle) {
+          const res = await fetch(`/api/scans/${scan.id}/render/download?download=1`, { credentials: 'same-origin' })
+          if (!res.ok) {
+            setDownloadError(res.status === 404 ? 'Rendered file not found — render dobara chalao' : `Download failed (HTTP ${res.status})`)
+            return
+          }
+          const total = Number(res.headers.get('Content-Length') || 0)
+          const writable = await handle.createWritable()
+          try {
+            if (res.body) {
+              const reader = res.body.getReader()
+              let received = 0
+              for (;;) {
+                const { done: rdone, value } = await reader.read()
+                if (rdone) break
+                if (value) {
+                  await writable.write(value)
+                  received += value.byteLength
+                  setDownloadedBytes(received)
+                  if (total > 0) setDownloadPct(Math.min(100, Math.round((received / total) * 100)))
+                }
+              }
+            }
+            await writable.close()
+            setDownloadPct(100)
+          } catch (err) {
+            try {
+              await writable.abort()
+            } catch {
+              /* ignore */
+            }
+            throw err
+          }
+          return
+        }
+      }
+
+      // FALLBACK (browsers without the File System Access API): blob assembly.
       const res = await fetch(`/api/scans/${scan.id}/render/download?download=1`, { credentials: 'same-origin' })
       if (!res.ok) {
         setDownloadError(res.status === 404 ? 'Rendered file not found — render dobara chalao' : `Download failed (HTTP ${res.status})`)
@@ -121,8 +183,6 @@ export function RenderPanel({ scan }: { scan: Scan }) {
         setDownloadPct(100)
         setDownloadedBytes(blob.size)
       }
-      const baseName = (scan.movieName || 'render').replace(/\.[^.]+$/, '')
-      const fileName = `${baseName}-stitched-${job?.settings?.resolution || 'export'}.mp4`.replace(/[^\w.\- ]+/g, '_')
       objectUrl = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = objectUrl
@@ -156,6 +216,12 @@ export function RenderPanel({ scan }: { scan: Scan }) {
         Sab matched movie scenes short ke order me ek video ki tarah — neeche instant preview (bina processing),
         aur real export ORIGINAL movie quality se ffmpeg ke saath.
       </p>
+      {scan.status === 'stopped' && (
+        <p className="mt-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+          PARTIAL RESULTS — scan stop hua hai. Ab tak jitne matches mile hain (verified + unverified dono) unka
+          preview/export yahin ho sakta hai — mehnat safe hai. Resume karne par scan wahi se continue hoga.
+        </p>
+      )}
 
       <StitchedPreview scan={scan} segments={segments} totalSeconds={totalSeconds} />
 

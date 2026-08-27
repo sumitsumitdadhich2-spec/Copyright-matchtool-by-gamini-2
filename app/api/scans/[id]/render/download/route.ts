@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { Readable } from 'node:stream'
 import { getScan } from '@/lib/store'
 import { renderOutputPath } from '@/lib/render'
 
@@ -62,15 +63,10 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   })
 }
 
+/** BACKPRESSURE-SAFE adapter: Readable.toWeb only pulls the next chunk when the
+ *  client is ready. The old hand-rolled version enqueued every 'data' event
+ *  immediately, so a slow client buffered the ENTIRE file in server memory —
+ *  that was the crash on big downloads. */
 function toWeb(stream: fs.ReadStream): ReadableStream {
-  return new ReadableStream({
-    start(controller) {
-      stream.on('data', (chunk) => controller.enqueue(new Uint8Array(chunk as Buffer)))
-      stream.on('end', () => controller.close())
-      stream.on('error', (err) => controller.error(err))
-    },
-    cancel() {
-      stream.destroy()
-    },
-  })
+  return Readable.toWeb(stream) as unknown as ReadableStream
 }

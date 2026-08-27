@@ -734,6 +734,7 @@ class Scheduler {
     await this.applyTwelveLabsPrefilter(job)
     if (job.stopping) {
       scan.status = 'stopped'
+      this.buildPartialReport(job)
       this.finish(job)
       return
     }
@@ -867,7 +868,8 @@ class Scheduler {
 
     if (job.stopping) {
       scan.status = 'stopped'
-      addLog(scan, 'warn', 'Scan stopped. Pending chunks saved — use Resume to continue.')
+      this.buildPartialReport(job)
+      addLog(scan, 'warn', 'Scan stopped. Pending chunks saved — use Resume to continue. Ab tak ke results (unverified samet) export/preview ke liye ready hain.')
       this.finish(job)
       return
     }
@@ -879,6 +881,7 @@ class Scheduler {
     // Quota ran out mid-scan/mid-verification: keep the scan resumable instead of finishing.
     if (leftover.length > 0 || chunksLeft) {
       scan.status = 'stopped'
+      this.buildPartialReport(job)
       addLog(
         scan,
         'warn',
@@ -1579,6 +1582,41 @@ class Scheduler {
       }
     }
     scan.matches.sort((a, b) => a.shortStart - b.shortStart || a.movieStart - b.movieStart)
+    this.mark(job)
+  }
+
+  /** PARTIAL report on Stop/pause: jitna kaam ho chuka hai wo TURANT export/preview
+   *  ke liye available rahe — SAME rule as a finished scan: verified matches +
+   *  unverified/pending candidates (verified flag na hone par bhi) sab included.
+   *  Resume phir bhi wahi se continue karta hai (pending chunks/groups untouched). */
+  private buildPartialReport(job: Job) {
+    const { scan } = job
+    const segments = scan.shortSegments || []
+    const allChunks = segments.flatMap((s) => s.chunks)
+    const groups = scan.candidateGroups || []
+    if (!Array.isArray(scan.matches)) scan.matches = []
+    scan.matches.sort((a, b) => a.shortStart - b.shortStart || a.movieStart - b.movieStart)
+    scan.report = {
+      totalScanTimeMs: Date.now() - (scan.startedAt || Date.now()),
+      chunksScanned: allChunks.filter((c) => c.status === 'match' || c.status === 'no_match').length,
+      chunksFailed: allChunks.filter((c) => c.status === 'failed').length,
+      modelsUsed: MODEL_POOL.filter((m) => job.lanes.some((l) => getModelUsage(m.id, l.apiKey) > 0)).map((m) => m.id),
+      matches: scan.matches,
+      groupsTotal: groups.length,
+      groupsConfirmed: groups.filter((g) => g.status === 'confirmed').length,
+      groupsRejected: groups.filter((g) => g.status === 'rejected').length,
+      groupsUnverified: groups.filter((g) => g.status === 'unverified').length,
+      prefilterMode: scan.prefilter?.mode === 'prefiltered' ? 'twelvelabs' : 'full',
+      prefilterSelected: scan.prefilter?.selectedChunks,
+      prefilterTotal: scan.prefilter?.totalChunks,
+    }
+    if (scan.matches.length > 0) {
+      addLog(
+        scan,
+        'info',
+        `Partial results saved: ${scan.matches.length} match(es) (verified + unverified dono) — export/preview ab available hai, Resume karne par scan wahi se continue hoga`,
+      )
+    }
     this.mark(job)
   }
 

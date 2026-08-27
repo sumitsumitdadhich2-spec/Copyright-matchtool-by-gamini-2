@@ -224,7 +224,9 @@ export function Dashboard() {
           {scan && <CandidatesPanel scan={scan} />}
           {scan && scan.report && <ReportPanel scan={scan} />}
           {scan && (scan.matches?.length ?? 0) > 0 && <ComparePanel scan={scan} />}
-          {scan && scan.status === 'done' && (scan.matches?.length ?? 0) > 0 && <RenderPanel scan={scan} />}
+          {scan && (scan.status === 'done' || scan.status === 'stopped') && (scan.matches?.length ?? 0) > 0 && (
+            <RenderPanel scan={scan} />
+          )}
           {scan && <ChunkResultsPanel scan={scan} />}
           {scan && <LogsPanel scan={scan} />}
         </div>
