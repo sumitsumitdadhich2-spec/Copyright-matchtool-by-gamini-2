@@ -69,7 +69,10 @@ export function Dashboard() {
   const canResume = Boolean(
     scan && !running && (status === 'stopped' || ((status === 'error' || status === 'scanning') && hasResumableWork)),
   )
-  const canStop = running
+  // Stop dab chuka hai lekin in-flight requests background me settle ho rahi hain —
+  // partial results/export TURANT available hain, dobara Stop ki zaroorat nahi.
+  const stoppingInBackground = Boolean(running && status === 'stopped')
+  const canStop = running && !stoppingInBackground
 
   async function action(path: string, body?: object) {
     if (!scanId) return
@@ -133,6 +136,12 @@ export function Dashboard() {
                   ) : null
                 })()}
             </>
+          )}
+          {stoppingInBackground && (
+            <span className="flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning/15 px-3 py-1 text-xs font-medium text-warning">
+              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+              Stopping — partial results ready (export niche available)
+            </span>
           )}
           <button
             type="button"

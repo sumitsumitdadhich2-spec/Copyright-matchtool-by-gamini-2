@@ -302,8 +302,24 @@ class Scheduler {
     const job = this.jobs.get(scanId)
     if (!job) return { ok: false, error: 'Scan is not running' }
     job.stopping = true
-    addLog(job.scan, 'warn', 'Stop requested — finishing in-flight requests, counters saved')
-    job.dirty = true
+    // INSTANT PARTIAL RESULTS: status TURANT 'stopped' + partial report yahin
+    // ban jaata hai — user ko export/preview ke liye in-flight requests ke
+    // drain hone ka wait NAHI karna padta. Baad me aane wale in-flight results
+    // bhi scan.matches me merge hote rehte hain (periodic saver unhe save karta
+    // hai), aur runScan ka stop-checkpoint report ko dobara refresh kar deta hai.
+    job.scan.status = 'stopped'
+    this.buildPartialReport(job)
+    addLog(
+      job.scan,
+      'warn',
+      'Stop requested — ab tak ke results (unverified samet) TURANT export/preview ke liye ready. In-flight requests background me settle ho rahi hain; Resume wahi se continue karega.',
+    )
+    job.dirty = false
+    try {
+      saveScan(job.scan)
+    } catch {
+      /* periodic saver will retry */
+    }
     return { ok: true }
   }
 
@@ -399,6 +415,18 @@ class Scheduler {
 
   private mark(job: Job) {
     job.dirty = true
+  }
+
+  /** STOP-AWARE sleep: pacing waits 1 minute tak ke ho sakte hain — ye helper
+   *  chhote slices me sota hai aur Stop dabate hi turant exit ho jaata hai,
+   *  taaki workers minute-bhar latke na rahen. */
+  private async stoppableSleep(job: Job, ms: number) {
+    const until = Date.now() + ms
+    while (!job.stopping) {
+      const left = until - Date.now()
+      if (left <= 0) return
+      await sleep(Math.min(500, left))
+    }
   }
 
   /** Persist a verbatim Gemini response on a chunk (drives the UI raw-output expander).
@@ -780,7 +808,7 @@ class Scheduler {
         // Mirror: scan.chunks IS this segment's chunks array (same reference),
         // so the existing worker code + UI keep working unchanged.
         scan.chunks = seg.chunks
-        scan.status = 'scanning'
+        if (!job.stopping) scan.status = 'scanning'
         seg.status = 'scanning'
         // CONFIDENCE ORDER (TwelveLabs): sabse zyada confident chunks PEHLE scan
         // hote hain — matches jaldi milte hain, early-stop jaldi fire hota hai.
@@ -840,7 +868,9 @@ class Scheduler {
       // pipeline drain fully now.
       job.seg = null
       job.chunkPhaseDone = true
-      if (job.verifyQueue.length > 0 || job.verifyInFlight.size > 0) {
+      // STOP GUARD: stop ke baad status kabhi 'stopped' se wapas 'verifying'
+      // nahi hota — warna export/preview panel phir chhup jaata.
+      if (!job.stopping && (job.verifyQueue.length > 0 || job.verifyInFlight.size > 0)) {
         scan.status = 'verifying'
         this.mark(job)
       }
@@ -1242,8 +1272,11 @@ class Scheduler {
     if (wait > 0) {
       st.state = 'waiting'
       this.mark(job)
-      await sleep(wait)
+      await this.stoppableSleep(job, wait)
     }
+    // STOP CHECK: quota consume karne se PEHLE nikal jao — 'rate' kind se group
+    // bina attempt-penalty ke re-queue hota hai aur worker loop stopping par exit karta hai.
+    if (job.stopping) throw new GeminiError('rate', 'Stop requested — request cancelled before send')
     st.state = 'active'
     job.nextFreeAt[rk] = Date.now() + pacingIntervalMs(videoSeconds)
     st.usedToday = incrementModelUsage(m.id, lane.apiKey)
@@ -1735,9 +1768,17 @@ class Scheduler {
         if (wait > 0) {
           st.state = 'waiting'
           this.mark(job)
-          await sleep(wait)
+          await this.stoppableSleep(job, wait)
           st.state = 'active'
           this.mark(job)
+        }
+
+        // STOP CHECK: request bhejne / quota consume karne se PEHLE nikal jao —
+        // chunk wapas 'pending' ho jaata hai (no attempt penalty), Resume par wahi se chalega.
+        if (job.stopping) {
+          chunk.status = 'pending'
+          this.mark(job)
+          return
         }
 
         const [shortUri, uploaded] = await uploadsP
