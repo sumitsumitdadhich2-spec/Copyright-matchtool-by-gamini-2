@@ -565,7 +565,12 @@ class Scheduler {
     }
     // Pre-cut the next minute's pending chunk files locally (ffmpeg only, no API
     // quota). Sequential to keep CPU/disk pressure low while the scan runs.
-    const pendingIdx = next.chunks.filter((c) => c.status === 'pending').map((c) => c.index)
+    // CONFIDENCE ORDER: highest-confidence chunks cut first — wahi sabse pehle
+    // scan honge, isliye unka file + upload sabse pehle ready hona chahiye.
+    const pendingIdx = this.orderByConfidence(
+      next,
+      next.chunks.filter((c) => c.status === 'pending').map((c) => c.index),
+    )
     void (async () => {
       for (const ci of pendingIdx) {
         if (job.stopping) return
@@ -576,6 +581,20 @@ class Scheduler {
         }
       }
     })()
+    // NEXT-MINUTE CHUNK PRE-UPLOAD (user request: "next minute ke chunks upload
+    // karke READY rakho"): har lane par next minute ke pehle 2 highest-confidence
+    // chunks Gemini Files API par bhi pehle se upload ho jaate hain — minute
+    // start hote hi pehli request ZERO upload wait ke saath jaati hai. Uploads
+    // free hain (sirf bandwidth), quota sirf generate par lagta hai. Unused
+    // uploads finish() me delete ho jaate hain, Files API clean rahta hai.
+    const preUpload = pendingIdx.slice(0, 2)
+    for (const lane of job.lanes) {
+      for (const ci of preUpload) {
+        if (!lane.chunkUploads.has(ci)) {
+          void this.startChunkUpload(job, lane, ci, true).catch(() => {})
+        }
+      }
+    }
   }
 
   // ---------- Twelve Labs pre-filter (optional, accuracy-first) ----------
@@ -1096,10 +1115,25 @@ class Scheduler {
       added++
     }
     if (added > 0) {
-      // CONFIDENCE ORDER (TwelveLabs): sabse zyada confident groups PEHLE verify
-      // hote hain (high→low) — pehle hi saare expected matches confirm hone ke
-      // chances badhte hain aur early-stop jaldi fire hota hai.
-      job.verifyQueue.sort((a, b) => this.groupConfidence(scan, groups[b]) - this.groupConfidence(scan, groups[a]))
+      // ORDER 1 — CHUNK COVERAGE FIRST (early-stop accelerator): jis group ke
+      // chunks me se koi bhi abhi tak quick-confirm NAHI hua, wo group PEHLE
+      // verify hota hai — taaki har matched chunk ka 1 segment jaldi se jaldi
+      // SAME confirm ho aur early-stop turant fire kare. Ek hi chunk ke kai
+      // groups ko baar-baar pehle verify karne me quota lagta hai, coverage nahi badhti.
+      // ORDER 2 — CONFIDENCE (TwelveLabs): high→low.
+      const confirmedChunks = new Set<number>()
+      for (const g of groups) {
+        for (const c of g.candidates) {
+          if (c.verdict === 'same' || c.rescanVerdict === 'same') confirmedChunks.add(c.chunkIndex)
+        }
+      }
+      const coversNewChunk = (g: CandidateGroup): number =>
+        g.candidates.some((c) => !confirmedChunks.has(c.chunkIndex)) ? 1 : 0
+      job.verifyQueue.sort(
+        (a, b) =>
+          coversNewChunk(groups[b]) - coversNewChunk(groups[a]) ||
+          this.groupConfidence(scan, groups[b]) - this.groupConfidence(scan, groups[a]),
+      )
     }
     if (added > 0) {
       addLog(
