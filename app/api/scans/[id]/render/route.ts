@@ -11,8 +11,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const { id } = await ctx.params
   const scan = getScan(id)
   if (!scan) return NextResponse.json({ error: 'Scan not found' }, { status: 404 })
-  if (scan.status !== 'done') {
-    return NextResponse.json({ error: 'Scan must be complete before rendering' }, { status: 400 })
+  // PARTIAL EXPORT: stopped scans bhi render kar sakte hain — jitna kaam hua
+  // hai (verified + unverified matches) wahi export hota hai, Resume phir bhi kaam karta hai.
+  if (scan.status !== 'done' && scan.status !== 'stopped') {
+    return NextResponse.json({ error: 'Scan must be complete or stopped before rendering' }, { status: 400 })
   }
   if (buildRenderSegments(scan).length === 0) {
     return NextResponse.json({ error: 'No matched scenes to render' }, { status: 400 })
